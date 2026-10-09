@@ -1,0 +1,55 @@
+# API and orchestration
+fastapi>=0.109,<0.120
+uvicorn[standard]>=0.30
+python-multipart>=0.0.6
+websockets>=12
+pydantic>=2
+python-dotenv>=1
+PyYAML>=6
+langgraph
+langchain
+langchain-core
+langchain-community
+langchain-openai
+langchain-chroma
+openai
+
+# Scientific computing and machine learning
+numpy>=1.24
+pandas>=2
+scipy>=1.10
+scikit-learn>=1.3
+statsmodels>=0.14
+imbalanced-learn
+xgboost
+lightgbm
+catboost
+shap
+autogluon.tabular
+mrmr-selection==0.2.8
+mlxtend
+skrebate
+sklearn-genetic-opt
+skfeature-chappers
+impyute
+
+# Metabolomics, retrieval, and storage
+biopython>=1.81
+gseapy>=1.0
+chromadb
+faiss-cpu
+beautifulsoup4
+requests
+lxml
+tqdm
+
+# Reports and visualization
+matplotlib>=3.7
+seaborn>=0.12
+reportlab>=4
+PyMuPDF
+Pillow
+adjustText
+upsetplot
+openpyxl
+xlrd

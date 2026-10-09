@@ -1,0 +1,394 @@
+paths:
+  phase0_output_key: phase0_output
+  phase1_selected_features: output/phase1/final/selected_features_final.csv
+  phase2_winner_panel: output/phase1/artifacts/phase2_winner_scores.json
+  figures_dir: output/figures/
+  default_disease_name: ''
+  target_column: target
+phase0:
+  defaults:
+    use_cache: true
+    max_candidates: 80
+    pathway_top_k: 20
+    disease_fuzzy_cutoff: 0.6
+    cache_fuzzy_cutoff: 0.8
+    no_evidence_score: -999.0
+    threshold_zscore: 0.5
+    normalize_upper_quantile: 0.95
+    max_abstracts_per_candidate: 15
+  paths:
+    disease_map: storage/disease_map.json
+    pathway_map: storage/pathbank_pathway_map.json
+    pathway_map_reverse: storage/pathbank_pathway_map_reverse.json
+    taxonomy_map: storage/taxonomy_map.json
+    reaction_graph: storage/hmdb_reaction_graph.json
+    reaction_class_info: storage/reaction_class_info.json
+    metabolite_lookup: storage/metabolite_lookup.json
+    shorthand_map: storage/shorthand_map.json
+    disease_pathway_map: storage/disease_pathway_map.json
+    metabolite_context_map: storage/metabolite_context_map.json
+    cache_path: storage/phase0_cache.json
+    output_dir: storage/phase0_outputs
+    output_latest: storage/phase0_output_latest.json
+    evidence_dir: storage/phase0_evidence
+    full_result_dir: storage/phase0_evidence
+  stage1:
+    max_candidates_from_kg: 200
+    hit_count_sources:
+    - pubmed
+    hard_drop_require_pathway_if_zero_hit: true
+    pathway_relevance_min_score: 1.5
+    retain_low_hit_with_strong_pathway_only: true
+    low_hit_max_hits: 5
+    low_hit_pathway_relevance_min_score: 1.5
+    candidate_sort_by: kg_then_hits
+  literature:
+    query_field: tiab
+    years_back: null
+    top_k_abstracts: 12
+    max_batch_size: 8
+    relevance_filter_enabled: true
+    min_relevant_abstracts: 1
+  pathway_retrieval:
+    use_runtime_disease_pathway_retrieval: true
+    use_llm_rerank: true
+    llm_rerank_model: gpt-4o
+    llm_rerank_temperature: 0.0
+    llm_rerank_top_k: 30
+    runtime_cache_dir: storage/external_pathways/runtime_disease_pathways
+    trigger:
+      min_core_count: 5
+      min_broad_count: 20
+      families:
+      - mental_health
+      - immune_inflammatory
+      - deficiency_disorder
+  pubmed:
+    email: metaboagent@example.com
+    max_results: 5
+    intent: association
+    hit_count_intent: general
+    abstract_intent: association
+  scoring:
+    lambda_consistency: 0.5
+    normalize_method: quantile95
+    normalize_upper_quantile: 0.95
+    threshold_rule: mu_plus_0.5sigma
+    threshold_zscore: 0.5
+  weights:
+    low_evidence:
+      w_clin: 1.0
+      w_spec: 1.5
+      w_mech: 1.0
+    mid_evidence:
+      w_clin: 1.5
+      w_spec: 1.5
+      w_mech: 0.75
+    high_evidence:
+      w_clin: 2.5
+      w_spec: 2.5
+      w_mech: 0.5
+  llm:
+    model: gpt-4o
+    temperature: 0.0
+    top_logprobs: 5
+    extraction_model: gpt-4o
+    scoring_model: gpt-4o
+phase4:
+  llm:
+    provider: openai_compatible
+    model: gemini-2.5-pro
+    temperature: 0.0
+    max_retries: 2
+phase1:
+  io_policy:
+    dual_write_enabled: true
+    prefer_new_read: true
+    fallback_old_read: true
+  engineered_features:
+    enabled: true
+    rules_version: engineered_features.v1
+    use_pre_engineering_matrix: true
+    pathway_postcheck_enabled: true
+  paths:
+    legacy_selected_features: data/selected_features_final.csv
+    legacy_artifacts_dir: output/artifacts
+    autogluon_results: data/autogluon_training_results.json
+    output_root: output/phase1
+    intermediate_root: output/phase1/intermediate
+    intermediate_latest_dir: output/phase1/intermediate/latest
+    stability_temp_dir: output/phase1/intermediate/latest/stability_logs
+    artifacts_dir: output/phase1/artifacts
+    autogluon_models_dir: output/phase1/artifacts/models/autogluon
+    final_dir: output/phase1/final
+    selected_features_csv: output/phase1/final/selected_features_final.csv
+    panel_scores_json: output/phase1/artifacts/phase1_panel_scores.json
+    phase2_winner_scores_json: output/phase1/artifacts/phase2_winner_scores.json
+    engineered_feature_rules: storage/engineered_feature_rules.json
+    engineered_feature_registry: output/phase1/intermediate/latest/engineered/engineered_feature_registry.json
+    intermediate_legacy_dirs:
+    - data/feature_selection
+    - data/final_feature_selection
+    - data/funnel_feature_selection
+    - data/univariate_analysis
+    - data/pca_analysis
+    - data/plsda_results
+    - data/model_analysis
+    - data/model_artifacts
+    - data/model_building
+    - data/model_reports
+  feature_selection:
+    selection_frequency_threshold: 0.6
+    method_consensus_threshold: 2
+    final_panel_target_size: 15
+    per_method_select_k: 15
+    min_final_feature_count: 8
+    max_pairwise_correlation: 0.9
+phase2:
+  soft_epsilon_feasible:
+    enabled: true
+    default_perf_margin: 0.02
+    scenario_perf_margin:
+      primary_care: 0.01
+      er_triage: 0.015
+      companion_diagnostics: 0.005
+  probability_recalibration:
+    enabled: true
+  f_bio_v2:
+    enabled: true
+    mode_selection: auto
+    gamma_topo: 0.05
+    delta_panel: 0.03
+    topk_ratio: 0.3
+    topk_min_k: 3
+    aggregation:
+      single: direct
+      sum: topk_mean
+      pathway: topk_mean
+      ratio: minmax_blend
+    structure_bonus:
+      single: 0.0
+      sum: 0.02
+      ratio: 0.04
+      pathway: 0.05
+    calibration:
+      enabled: false
+      max_candidates: 200
+      topk_values:
+      - 5
+      - 10
+      - 20
+    weights:
+      exact_anchor:
+        direct_prior: 0.1
+        disease_pathway_align: 0.25
+        anchor_link: 0.4
+        coverage_gain: 0.25
+      external_anchor:
+        direct_prior: 0.1
+        disease_pathway_align: 0.35
+        anchor_link: 0.2
+        coverage_gain: 0.35
+      disease_only:
+        direct_prior: 0.05
+        disease_pathway_align: 0.5
+        anchor_link: 0.0
+        coverage_gain: 0.45
+evaluation:
+  active_scenario: primary_care
+  scenarios:
+    primary_care:
+      name: 基层医院早筛 (Primary Care Screening)
+      description: 平衡预测性能、生物学机制、成本和独立性
+      intended_use: risk stratification for early screening
+      clinical_action: refer high-risk individuals for confirmatory assessment
+      weights:
+        f_perf: 0.35
+        f_bio: 0.4
+        f_cost: 0.15
+        f_corr: 0.1
+      risk_thresholds:
+      - 0.1
+      - 0.15
+      - 0.2
+      - 0.25
+      default_action_threshold: 0.15
+      use_observed_prevalence: true
+      resource_assumptions:
+        screen_population_size: 1000
+        panel_test_cost_per_person: 80.0
+        confirmatory_test_cost_per_person: 300.0
+        baseline_strategy: phase1_panel
+    er_triage:
+      name: 急诊快速分诊 (Emergency Room Triage)
+      description: 极度追求简约性和快速检测
+      intended_use: rapid triage risk flagging
+      clinical_action: flag urgent high-risk individuals for accelerated workup
+      weights:
+        f_perf: 0.35
+        f_bio: 0.15
+        f_cost: 0.45
+        f_corr: 0.05
+      risk_thresholds:
+      - 0.2
+      - 0.3
+      - 0.4
+      - 0.5
+      default_action_threshold: 0.3
+      use_observed_prevalence: true
+      resource_assumptions:
+        screen_population_size: 1000
+        panel_test_cost_per_person: 60.0
+        confirmatory_test_cost_per_person: 250.0
+        baseline_strategy: phase1_panel
+    companion_diagnostics:
+      name: 伴随诊断 (Companion Diagnostics)
+      description: 追求生物学机制和预测性能的极致
+      intended_use: patient enrichment for downstream therapeutic decision-making
+      clinical_action: identify high-likelihood patients for confirmatory biomarker-guided
+        intervention
+      weights:
+        f_perf: 0.45
+        f_bio: 0.4
+        f_cost: 0.05
+        f_corr: 0.1
+      risk_thresholds:
+      - 0.3
+      - 0.4
+      - 0.5
+      - 0.6
+      default_action_threshold: 0.4
+      use_observed_prevalence: true
+      resource_assumptions:
+        screen_population_size: 1000
+        panel_test_cost_per_person: 120.0
+        confirmatory_test_cost_per_person: 500.0
+        baseline_strategy: phase1_panel
+visualization:
+  radar_plot:
+    dpi: 300
+    figsize:
+    - 8
+    - 8
+    output_filename: fig3_radar_4d.pdf
+  pareto_plot:
+    dpi: 300
+    figsize:
+    - 12
+    - 8
+    output_filename: fig2b_pareto_trajectory.pdf
+  shap_plot:
+    patient_index: 1
+  rcs_plot:
+    backend: r
+    n_knots: 3
+    n_grid: 200
+    output_filename: phase2_winner_rcs_curves.pdf
+phase3:
+  visualization:
+    style_preset: nature_minimal
+    enable_stats_scatter: false
+    enable_upset: true
+    enable_stability_landscape: true
+    enable_method_feature_heatmap: true
+    enable_autogluon_roc: true
+    enable_pareto: true
+    enable_radar_4d: true
+    enable_final_roc: true
+    enable_dca: true
+    enable_shap: true
+    enable_rcs: true
+    enable_calibration: true
+    enable_threshold_performance: true
+    render_policy:
+      enable_adaptive_config: true
+      enable_internal_self_check: true
+      internal_retry_limit: 1
+    review_policy:
+      enable_vlm_review: true
+      mode: selective
+      max_single_figure_reviews: 3
+      enable_composite_review: true
+      high_risk_figures:
+      - plot_stability_landscape
+      - plot_pareto
+      - plot_shap
+      - composite_figure
+    heatmap_policy:
+      focused_mode_threshold: 18
+      focused_rejected_count: 6
+      max_feature_label_length: 28
+    landscape_policy:
+      annotate_top_n_max: 15
+      show_size_legend: true
+models:
+  baselines:
+    phase0_baseline:
+      name: Phase 0 Baseline
+      description: 仅使用文献特征（Phase 0 confirmed biomarkers）
+      source: phase0_output.confirmed_biomarkers
+    phase1_baseline:
+      name: Phase 1 Baseline
+      description: 使用全量机器学习筛选特征
+      source: data/selected_features_final.csv
+  winner:
+    name: PToT Winner
+    description: PToT 引擎搜索出的最优面板
+    source: phase2_winner_panel
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  output_dir: logs/
+memory:
+  enabled: true
+  read_enabled: true
+  write_enabled: true
+  storage_dir: storage/memory
+  case_store_path: storage/memory/memory_cases.jsonl
+  semantic_store_path: storage/memory/semantic_memory.json
+  top_k:
+    phase0: 5
+    phase1: 5
+    phase2: 8
+  writeback:
+    allow_failed_run_episode: true
+    allow_failed_run_semantic: false
+  retrieval:
+    recent_case_limit: 500
+    phase0:
+      min_quality_score: 0.35
+      disease_similarity_min: 0.55
+    phase1:
+      min_quality_score: 0.3
+      exclude_failed_cases: true
+    phase2:
+      min_quality_score: 0.35
+      exclude_rollback_cases: true
+  compaction:
+    enabled: true
+    dedup_on_write: true
+    recent_window: 200
+    keep_strategy: highest_quality_then_latest
+  semantic:
+    enabled: true
+    auto_refresh_on_write: true
+    min_case_quality: 0.55
+    max_supporting_cases: 20
+    disease_profile:
+      top_biomarkers: 15
+      top_pathways: 12
+      top_synonyms: 8
+    strategy_profile:
+      top_preprocessing_hints: 8
+      top_fix_hints: 6
+      top_models: 4
+      top_feature_methods: 4
+      top_anchor_hints: 12
+      top_good_groups: 6
+  phase1:
+    max_fix_hints: 3
+    max_strategy_hints: 5
+  phase2:
+    candidate_boost_cap: 0.15
+    max_anchor_hints: 10
+    allow_param_override: false

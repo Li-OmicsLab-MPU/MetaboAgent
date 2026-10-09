@@ -1,0 +1,592 @@
+{
+  "sop_id": "METABO_LCMS_UNTARGETED_STD_002",
+  "sop_name": "Untargeted LC-MS Code Interpreter Analysis SOP",
+  "description": "Phase 1 重构版本：采用 Code Interpreter 模式，Agent 动态生成 Python 代码执行每个步骤，利用本地高质量工具库（Domain Tools + Analysis Tools）。适用于大多数靶向 LC-MS（代谢组学/脂质组学）表格型峰表数据的标准分析流程。当前版本将知识驱动工程特征固定构建在 pre-engineering matrix 上，并将 auto-scaling 延后到工程特征合并之后执行。",
+  "sop_version": "2.2.0",
+  "language": "zh-CN",
+  "architecture_pattern": "code_interpreter",
+  "execution_notes": {
+    "code_generation_guidelines": [
+      "CONFIG-FIRST: Resolve all Phase1 IO paths via get_config().get_phase1_path(key), and only use hardcoded defaults as fallback when config key is missing.",
+      "CRITICAL: Use 'output/phase1/intermediate/latest/' as the base output directory for ALL analysis outputs. Example: os.makedirs('output/phase1/intermediate/latest/pca_analysis', exist_ok=True)",
+      "Generate complete, executable Python scripts.",
+      "Parse tool outputs using `json.loads()` as tools return JSON strings, not objects.",
+      "Use `print(json.dumps({'__METABO_UPDATE__': {...}}))` for state updates.",
+      "Handle file paths explicitly; do not pass DataFrames to tools."
+    ],
+    "output_configuration": {
+      "base_output_dir": "output/phase1/intermediate/latest",
+      "description": "All analysis outputs MUST be saved under output/phase1/intermediate/latest/ directory",
+      "subdirectories": {
+        "univariate": "univariate_analysis",
+        "pca": "pca_analysis",
+        "plsda": "plsda_results",
+        "feature_selection": "feature_selection",
+        "model_results": "model_results",
+        "model_artifacts": "model_artifacts"
+      }
+    },
+    "feature_selection_config": {
+      "stability_iterations": {
+        "default": 30,
+        "description": "Number of iterations for stability selection (imbalanced data)",
+        "range": [
+          10,
+          100
+        ],
+        "recommendation": "30 for fast execution, 50-100 for more robust results"
+      },
+      "n_selection_methods": {
+        "default": 6,
+        "description": "Number of feature selection methods to use",
+        "options": {
+          "6": [
+            "random_forest",
+            "lightgbm",
+            "xgboost",
+            "lasso",
+            "t_test",
+            "anova"
+          ],
+          "8": [
+            "random_forest",
+            "lightgbm",
+            "xgboost",
+            "lasso",
+            "elasticnet",
+            "mutual_info",
+            "t_test",
+            "anova"
+          ],
+          "12": [
+            "random_forest",
+            "lightgbm",
+            "xgboost",
+            "lasso",
+            "elasticnet",
+            "mutual_info",
+            "t_test",
+            "anova",
+            "fcbf",
+            "cfs",
+            "relief",
+            "mrmr"
+          ]
+        },
+        "recommendation": "6 for fast execution, 12 for comprehensive analysis"
+      }
+    }
+  },
+  "stages": [
+    {
+      "stage_id": 0,
+      "name": "Data Ingestion & Schema Detection (数据摄入与结构识别)",
+      "description": "加载数据，执行基础清洗，并自动识别关键列（样本ID、目标列、批次列）以建立保护机制。",
+      "steps": [
+        {
+          "step_id": "0.1",
+          "action": "coding_task",
+          "instruction": "Ingest Data, Validate Quality, and Detect Schema",
+          "details": "Import pandas, numpy, json, os.\n1. **Load & Validate**: Load `current_data_path`. Validate n_rows>0. Remove empty columns. Report duplicates.\n2. **Schema Detection**:\n   - Identify `target_column` from explicit user input first; otherwise use safe heuristics.\n   - Identify `sample_id_column` using **strict priority rules**:\n     a) First look for explicit ID-like column names only: `Sample_ID`, `sample_id`, `SampleID`, `sampleid`, `subject_id`, `patient_id`, `case_id`, `specimen_id`, `participant_id`, `row_id`, `ROW_ID`.\n     b) Only if no explicit ID-like name is found, allow a fallback heuristic on columns with `object`/string dtype and very high uniqueness ratio (>0.95).\n     c) **NEVER** select a numeric metabolite/intensity column as `sample_id_column` only because it has high uniqueness.\n     d) If no safe ID column is found, set `sample_id_column = None`.\n   - Identify `batch_column` separately.\n3. **Protection**: Define `protected_columns` list (ID + Target + Batch).\n4. **Output**: Print JSON via Magic Output Protocol containing `protected_columns`, `sample_id_column`, `target_column`, `n_rows`, `n_cols`. Save cleaned dataframe if cols removed.\n\n**CRITICAL SAMPLE-ID RULES**:\n- Prefer explicit ID-like names over heuristics.\n- A metabolite feature column must not be treated as sample ID just because values are nearly unique.\n- HMDB-style columns or metabolite-like names are feature columns, not sample IDs.\n- When uncertain, return `sample_id_column = None` rather than protecting a likely metabolite column.\n\n**SAFE EXAMPLE**:\n```python\nimport pandas as pd, json\n\ndf = pd.read_excel(current_data_path) if current_data_path.endswith(('.xlsx', '.xls')) else pd.read_csv(current_data_path)\ntarget_column = context_variables.get('target_column') or 'target'\n\nexplicit_id_candidates = [\n    'Sample_ID', 'sample_id', 'SampleID', 'sampleid', 'subject_id',\n    'patient_id', 'case_id', 'specimen_id', 'participant_id', 'row_id', 'ROW_ID'\n]\nsample_id_column = next((c for c in explicit_id_candidates if c in df.columns), None)\n\nif sample_id_column is None:\n    for col in df.columns:\n        if col == target_column:\n            continue\n        if df[col].dtype == 'object':\n            unique_ratio = df[col].nunique(dropna=True) / max(len(df), 1)\n            if unique_ratio > 0.95:\n                sample_id_column = col\n                break\n\nprotected_columns = [c for c in [sample_id_column, target_column] if c]\nprint(json.dumps({'__METABO_UPDATE__': {\n    'sample_id_column': sample_id_column,\n    'target_column': target_column,\n    'protected_columns': protected_columns,\n    'n_rows': int(len(df)),\n    'n_cols': int(len(df.columns))\n}}))\n```",
+          "lib_hint": "pandas, numpy, json, os",
+          "context_files": [
+            "current_data_path",
+            "target_column (optional user input)"
+          ],
+          "outputs": [
+            "sample_id_column",
+            "target_column",
+            "protected_columns",
+            "data_summary"
+          ],
+          "reasoning": "原子化加载与识别。建立保护列清单是整个流水线的基础，必须在任何数值操作前明确。"
+        },
+        {
+          "step_id": "0.2",
+          "action": "coding_task",
+          "instruction": "Map Metabolite Names to HMDB IDs using Fast JSON Lookup",
+          "details": "TASK: Map metabolite column names to HMDB IDs using fast JSON lookup and save mapping.\n\n**CRITICAL: Generate unique output path based on input filename**\n```python\nimport os\nimport json\nimport pandas as pd\nimport re\nfrom src.tools.domain.json_metabolite_mapper import map_metabolite_fast\n\n# Generate unique output path based on input filename\ninput_basename = os.path.basename(current_data_path).replace('.csv', '')\noutput_path = os.path.join(phase1_intermediate_latest, f'{input_basename}_standardized.csv')\nmapping_path = os.path.join(phase1_intermediate_latest, f'{input_basename}_name_mapping.json')\n\n# Check if output already exists for THIS specific input\nif os.path.exists(output_path) and os.path.exists(mapping_path):\n    print(f\"Metabolite mapping file already exists for {input_basename}, using it directly.\")\n    \n    # Load existing mapping\n    with open(mapping_path, 'r') as f:\n        name_mapping = json.load(f)\n    \n    print(json.dumps({\n        '__METABO_UPDATE__': {\n            'current_data_path': output_path,\n            'metabolite_name_mapping': name_mapping,\n            'metabolite_name_mapping_path': mapping_path\n        }\n    }))\nelse:\n    # Proceed with mapping\n    # Load data and map metabolites...\n```\n\n**WORKFLOW**:\n1. Load data from `current_data_path` using pandas\n2. Initialize mapping dictionary: `name_mapping = {}`\n3. For each column (except protected columns (sample_id_column/target_column/batch_column)):\n   - Check if it already matches pattern `^HMDB\\d{5,9}$` (already an HMDB ID) - if yes, keep it\n   - Otherwise, call `map_metabolite_fast(column_name)` to get HMDB ID\n   - If HMDB ID found:\n     * RENAME the column to the HMDB ID\n     * Save mapping: `name_mapping[column_name] = hmdb_id`\n   - If not found, keep the original column name\n4. Save the updated dataframe (with renamed columns) to the unique output path\n5. **NEW**: Save the name mapping to JSON file\n6. Use Magic Output Protocol to update state with:\n   - `current_data_path`: path to standardized data\n   - `metabolite_name_mapping`: the mapping dictionary\n   - `metabolite_name_mapping_path`: path to mapping JSON file\n\n**CRITICAL - NO ERRORS ALLOWED**: \n- ANY mapping rate is acceptable (even 0%)\n- NEVER raise exceptions or errors related to mapping failures\n- NEVER use words like \"failed\", \"error\", \"Business Error\" in your code\n- Just report statistics and continue\n\n**OUTPUT FORMAT**:\n```python\nprint(f\"Metabolite Mapping Complete:\")\nprint(f\"  - Input file: {input_basename}\")\nprint(f\"  - Successfully mapped: {mapped_count} metabolites\")\nprint(f\"  - Kept original names: {unmapped_count} metabolites\")\nprint(f\"  - Mapping rate: {mapping_rate:.1%}\")\nprint(f\"  - Output saved to: {output_path}\")\nprint(f\"  - Mapping saved to: {mapping_path}\")\n\n# Save mapping to JSON\nwith open(mapping_path, 'w') as f:\n    json.dump(name_mapping, f, indent=2)\n\nprint(json.dumps({\n    '__METABO_UPDATE__': {\n        'current_data_path': output_path,\n        'metabolite_name_mapping': name_mapping,\n        'metabolite_name_mapping_path': mapping_path\n    }\n}))\n```\n\n**DO NOT** use `standardize_metabolite_names` tool - it's too slow. Only use `map_metabolite_fast`.",
+          "lib_hint": "re, pandas, json, src.tools.domain.json_metabolite_mapper",
+          "context_files": [
+            "current_data_path",
+            "protected_columns"
+          ],
+          "outputs": [
+            "standardized_data_path",
+            "metabolite_name_mapping",
+            "metabolite_name_mapping_path"
+          ],
+          "reasoning": "使用快速JSON查表（O(1)），跳过慢速ChromaDB检索。"
+        },
+        {
+          "step_id": "0.3",
+          "action": "coding_task",
+          "instruction": "Semantic Target Label Encoding (LLM-driven)",
+          "details": "TASK: Use LLM semantic reasoning to identify the positive class and encode labels as 0/1.\n\n**WORKFLOW**:\n1. Load data from current_data_path\n2. Get unique values from target_column\n3. Check if already encoded (if values are {0, 1}, skip)\n4. Use LLM to infer positive class:\n   ```python\n   from src.utils.llm_metadata_helper import infer_and_encode_labels\n   \n   scenario = context_variables.get('clinical_scenario', 'Clinical biomarker study')\n   unique_values = sorted(df[target_column].unique())\n   \n   mapping, positive_class, reasoning = infer_and_encode_labels(\n       scenario=scenario,\n       labels=[str(v) for v in unique_values]\n   )\n   ```\n5. Apply encoding to target_column\n6. Save encoded data (overwrite current_data_path)\n7. Save mapping to os.path.join(phase1_intermediate_latest, 'label_mapping.json')\n8. Update state with mapping information\n\n**CRITICAL RULES**:\n- ALWAYS check if already encoded before calling LLM\n- ALWAYS convert labels to int64 (not float64)\n- ALWAYS save the mapping for traceability\n- ALWAYS overwrite current_data_path with encoded data\n\n**EXAMPLE CODE**:\n```python\nimport pandas as pd\nimport json\nimport os\nfrom src.utils.llm_metadata_helper import infer_and_encode_labels\n\n# Load data\ndf = pd.read_csv(current_data_path)\ntarget_column = context_variables.get('target_column', 'Group')\n\n# Get unique values\nunique_values = sorted(df[target_column].unique())\n\n# Check if already encoded\nif set(unique_values) == {0, 1}:\n    print(\"Labels already encoded as 0/1, skipping LLM encoding\")\n    mapping = {0: 0, 1: 1}\n    positive_class = 1\n    reasoning = \"Already encoded\"\nelse:\n    # LLM semantic reasoning\n    scenario = context_variables.get('clinical_scenario', 'Clinical biomarker study')\n    \n    mapping, positive_class, reasoning = infer_and_encode_labels(\n        scenario=scenario,\n        labels=[str(v) for v in unique_values]\n    )\n    \n    print(f\"\\n=== LLM Label Encoding ===\")\n    print(f\"Scenario: {scenario}\")\n    print(f\"Original labels: {unique_values}\")\n    print(f\"Positive class: {positive_class}\")\n    print(f\"Reasoning: {reasoning}\")\n    print(f\"Mapping: {mapping}\")\n    \n    # Apply encoding\n    df[target_column] = df[target_column].astype(str).map(mapping).astype('int64')\n    \n    # Verify encoding\n    encoded_values = sorted(df[target_column].unique())\n    assert set(encoded_values) == {0, 1}, f\"Encoding failed: {encoded_values}\"\n    \n    # Save encoded data\n    df.to_csv(current_data_path, index=False)\n    print(f\"✓ Encoded data saved to: {current_data_path}\")\n    \n    # Save mapping\n    mapping_data = {\n        'scenario': scenario,\n        'positive_class': positive_class,\n        'reasoning': reasoning,\n        'mapping': mapping,\n        'original_labels': [str(v) for v in unique_values]\n    }\n    \n    mapping_path = os.path.join(phase1_intermediate_latest, 'label_mapping.json')\n    with open(mapping_path, 'w') as f:\n        json.dump(mapping_data, f, indent=2)\n    \n    print(f\"✓ Mapping saved to: {mapping_path}\")\n\n# Update state\nstate_updates = {\n    'label_mapping': mapping,\n    'positive_class': positive_class,\n    'label_encoding_reasoning': reasoning\n}\n\nprint(json.dumps({'__METABO_UPDATE__': state_updates}))\n```",
+          "lib_hint": "pandas, json, os, src.utils.llm_metadata_helper",
+          "context_files": [
+            "current_data_path",
+            "target_column",
+            "clinical_scenario"
+          ],
+          "outputs": [
+            "label_mapping",
+            "positive_class",
+            "label_encoding_reasoning"
+          ],
+          "reasoning": "使用LLM语义推理确定正类，在数据摄入阶段一次性编码为0/1，消除下游所有编码不一致问题。"
+        }
+      ],
+      "id": 0
+    },
+    {
+      "stage_id": 1,
+      "name": "Preprocessing & Cleaning (预处理与数据清洗)",
+      "description": "标准流程：Filter -> Impute -> Normalize -> Transform/Outlier Cap -> Integrity Check。Auto-scaling 延后到工程特征合并之后执行。",
+      "steps": [
+        {
+          "step_id": "1.1",
+          "action": "coding_task",
+          "instruction": "Execute Comprehensive Missing Value Strategy",
+          "details": "Import `delete_columns_tool`, `delete_rows_tool`, `impute_missing_tool` from `src.tools.analysis.data_analysis_tools`. \n1. **Filter**: Remove features >50% missing; Remove samples >35% missing (condition='missing_rate > 0.35').\n2. **Assess**: Check for MNAR pattern (correlation with low intensity).\n3. **Impute**: Identify columns with NaNs. If MNAR, call `impute_missing_tool(method='qrilc')`; else `method='knn'`. Fallback to `method='median'` on failure.\n4. **Save**: Save as `_imputed.csv`. Update metadata.",
+          "lib_hint": "src.tools.analysis.data_analysis_tools, pandas, numpy",
+          "context_files": [
+            "current_data_path",
+            "target_column",
+            "protected_columns"
+          ],
+          "outputs": [
+            "imputed_data_path"
+          ],
+          "reasoning": "先清理垃圾数据再修补漏洞。必须在归一化前完成缺失值处理。"
+        },
+        {
+          "step_id": "1.2",
+          "action": "coding_task",
+          "instruction": "Perform Normalization & Pre-processing",
+          "details": "TASK: Perform PQN normalization on preprocessed data.\n\nWORKFLOW:\n1. **Handle Zeros**: Load data from current_data_path. Replace 0/negative values in feature columns with small epsilon (0.5 * min_positive).\n\n2. **Save Preprocessed Data**: Save to a temporary file with '_preprocessed' suffix.\n\n3. **Apply PQN Normalization**: \n   Import: from src.tools.analysis.data_analysis_tools import pqn_normalization_tool\n   \n   Call: result_json = pqn_normalization_tool(data_path=preprocessed_path, sample_column=sample_id_column if sample_id_column else None)\n   \n   **CRITICAL**: This tool modifies the file IN-PLACE and returns JSON:\n   ```python\n   result = json.loads(result_json)\n   if result['success']:\n       normalized_path = result['output_path']  # Same as input path (in-place)\n   else:\n       # Handle error\n       print(f\"Error: {result['error']}\")\n   ```\n\n4. **Update State**: Use Magic Output Protocol to update current_data_path with the normalized file path.\n\nEXAMPLE CODE:\n```python\nimport pandas as pd\nimport json\nfrom src.tools.analysis.data_analysis_tools import pqn_normalization_tool\n\n# Load data\ndf = pd.read_csv(current_data_path)\n\n# Handle zeros in feature columns\nprotected = [c for c in [sample_id_column, target_column] if c]\nfeature_cols = [col for col in df.columns if col not in protected]\n\nfor col in feature_cols:\n    positive_vals = df[col][df[col] > 0]\n    if len(positive_vals) > 0:\n        min_positive = positive_vals.min()\n        epsilon = 0.5 * min_positive\n        df[col] = df[col].apply(lambda x: epsilon if x <= 0 else x)\n\n# Save preprocessed\npreprocessed_path = current_data_path.replace('.csv', '_preprocessed.csv')\ndf.to_csv(preprocessed_path, index=False)\n\n# Detect optional sample id column\nid_candidates = ['Sample_ID','sample_id','SampleID','sampleid']\nsample_id_column = next((c for c in id_candidates if c in df.columns), None)\n\n# Apply PQN (in-place modification)\nresult_json = pqn_normalization_tool(data_path=preprocessed_path, sample_column=sample_id_column if sample_id_column else None)\nresult = json.loads(result_json)\n\nif result['success']:\n    normalized_path = result['output_path']\n    print(f\"PQN normalization completed: {normalized_path}\")\n    print(json.dumps({'__METABO_UPDATE__': {'current_data_path': normalized_path}}))\nelse:\n    print(f\"Error: {result['error']}\")\n```",
+          "lib_hint": "src.tools.analysis.data_analysis_tools, pandas, numpy",
+          "context_files": [
+            "imputed_data_path",
+            "protected_columns"
+          ],
+          "outputs": [
+            "normalized_data_path"
+          ],
+          "reasoning": "PQN 消除系统性误差。处理0值是为后续Log2变换做准备。"
+        },
+        {
+          "step_id": "1.3",
+          "action": "coding_task",
+          "instruction": "Apply Transformation & Outlier Handling, Then Save Pre-Engineering Matrix",
+          "details": "TASK: Apply transformation and outlier handling, then save a pre-engineering matrix.\n\nWORKFLOW:\nChain operations on current_data_path:\n1. **Log2 Transformation**: Stabilize variance\n2. **Outlier Capping**: Cap outliers using IQR method\n3. **DO NOT Auto-Scale Yet**: Engineered ratio/sum/pathway features must be built before Z-score scaling\n4. **Save Pre-Engineering Matrix**: Save the post-log2/post-outlier dataset to a persistent file\n5. **Update State**: Set both `pre_engineering_data_path` and `current_data_path` to this saved file\n\n**CRITICAL: Tool Return Format**\nAll tools return JSON strings. You MUST parse them correctly:\n\n```python\nfrom src.tools.analysis.data_analysis_tools import log2_transformation_tool, cap_outliers_tool\nimport json\nimport os\nimport shutil\n\n# Step 1: Log2 transformation\nresult_json = log2_transformation_tool(data_path=current_data_path, columns=None)\nresult = json.loads(result_json)\nif not result['success']:\n    raise ValueError(f\"Log2 transformation failed: {result['error']}\")\nlog2_path = result['output_path']\n\n# Step 2: Cap outliers\nresult_json = cap_outliers_tool(data_path=log2_path, columns=None, method='iqr')\nresult = json.loads(result_json)\nif not result['success']:\n    raise ValueError(f\"Outlier capping failed: {result['error']}\")\noutlier_path = result['output_path']\n\n# Step 3: Persist pre-engineering matrix\npre_engineering_path = os.path.join(phase1_intermediate_latest, 'pre_engineering_matrix.csv')\nshutil.copy2(outlier_path, pre_engineering_path)\n\n# Update state\nprint(json.dumps({\n    '__METABO_UPDATE__': {\n        'pre_engineering_data_path': pre_engineering_path,\n        'current_data_path': pre_engineering_path\n    }\n}))\n```\n\n**CRITICAL RULES**:\n- ALWAYS parse tool output with json.loads()\n- ALWAYS check result['success'] before using result['output_path']\n- DO NOT auto-scale in this step\n- Engineered features must be generated from the pre-engineering matrix, not from a Z-scored matrix\n",
+          "lib_hint": "src.tools.analysis.data_analysis_tools",
+          "context_files": [
+            "normalized_data_path",
+            "protected_columns"
+          ],
+          "outputs": [
+            "pre_engineering_data_path"
+          ],
+          "reasoning": "Log2 与异常值处理应先完成，但 auto-scaling 必须延后到工程特征合并之后，才能保持 ratio/sum/pathway 的量纲语义。"
+        },
+        {
+          "step_id": "1.4",
+          "action": "coding_task",
+          "instruction": "Final Integrity Check for Pre-Engineering Matrix",
+          "details": "Load `pre_engineering_data_path` if available, otherwise fallback to `current_data_path`. Verify: 0 NaNs, 0 Infs. Check `protected_columns` integrity. If passed, save as `_cleaned_pre_engineering.csv`. Update `cleaned_data_path`, `pre_engineering_data_path`, and `current_data_path` via Magic Output.",
+          "lib_hint": "pandas, numpy, shutil",
+          "context_files": [
+            "pre_engineering_data_path",
+            "protected_columns"
+          ],
+          "outputs": [
+            "cleaned_data_path",
+            "pre_engineering_data_path"
+          ],
+          "reasoning": "最终质检应面向 pre-engineering matrix，确保交付给知识驱动特征工程的数据是完美的。"
+        },
+        {
+          "step_id": "1.5",
+          "action": "coding_task",
+          "instruction": "Set Default Analysis Strategy to ML Pipeline",
+          "details": "TASK: Set the default analysis strategy to use ML pipeline.\n\n**DEFAULT STRATEGY**: Always use ML pipeline unless explicitly overridden by user.\n\n**WORKFLOW**:\n1. Check if user has explicitly set `run_traditional_stats` in context_variables\n2. If NOT set by user, use default values:\n   - `run_traditional_stats = False`\n   - `run_ml_pipeline = True`\n3. If set by user, respect user's choice\n4. Output decision using Magic Output Protocol\n\n**CRITICAL**: Do NOT make decisions based on phase0_output. The presence of enriched pathways does NOT automatically mean we should use traditional stats. This should be a USER decision, not an automatic one.\n\n**EXAMPLE CODE**:\n```python\nimport json\n\n# Check if user has explicitly set the strategy\nuser_set_traditional_stats = context_variables.get('run_traditional_stats')\nuser_set_ml_pipeline = context_variables.get('run_ml_pipeline')\n\n# Default: Use ML pipeline\nif user_set_traditional_stats is None and user_set_ml_pipeline is None:\n    run_traditional_stats = False\n    run_ml_pipeline = True\n    decision_reason = \"Default strategy: ML pipeline for feature selection and model building\"\nelse:\n    # User has explicitly set the strategy, respect it\n    run_traditional_stats = user_set_traditional_stats if user_set_traditional_stats is not None else False\n    run_ml_pipeline = user_set_ml_pipeline if user_set_ml_pipeline is not None else True\n    decision_reason = \"User-specified strategy\"\n\n# Output decision\nstate_updates = {\n    \"run_traditional_stats\": run_traditional_stats,\n    \"run_ml_pipeline\": run_ml_pipeline,\n    \"analysis_strategy_decision\": decision_reason\n}\n\nprint(json.dumps({\"__METABO_UPDATE__\": state_updates}))\nprint(f\"\\n=== Analysis Strategy ===\")\nprint(f\"Run Traditional Stats: {run_traditional_stats}\")\nprint(f\"Run ML Pipeline: {run_ml_pipeline}\")\nprint(f\"Reason: {decision_reason}\")\n```\n\n**NOTE**: Traditional statistics (Stage 2-4) should only be used when the user explicitly requests it, not automatically based on Phase 0 output.",
+          "lib_hint": "python built-in, json",
+          "context_files": [
+            "context_variables"
+          ],
+          "outputs": [
+            "run_traditional_stats",
+            "run_ml_pipeline"
+          ],
+          "reasoning": "默认使用ML流程。只有用户明确要求时才使用传统统计学方法。"
+        }
+      ],
+      "id": 1
+    },
+    {
+      "stage_id": 1.5,
+      "name": "Knowledge-Driven Feature Engineering (知识驱动特征工程)",
+      "description": "基于 Phase 0 先验知识，采用“独立生成-最后合并-后置缩放”策略。工程特征统一构建于 pre-engineering matrix 上，防止语义漂移并确保下游模型兼容性。",
+      "condition": "phase0_output exists",
+      "steps": [
+        {
+          "step_id": "1.5.1",
+          "action": "coding_task",
+          "instruction": "Generate Reaction Ratio Features Using Feature Generator",
+          "details": "Import `generate_reaction_ratios` from `src.tools.domain.feature_generator`.\n\nTASK: Generate reaction-based ratio features from the pre-engineering matrix using the centralized feature generator.\n\n**CRITICAL: Use pre_engineering_data_path when available**\n- Resolve `data_path = pre_engineering_data_path if available else current_data_path`\n- Do NOT manually loop over metabolite pairs\n- Do NOT manually divide columns inside ad-hoc SOP code\n\nREQUIRED TOOL: You MUST call `generate_reaction_ratios(...)`.\nImport: `from src.tools.domain.feature_generator import generate_reaction_ratios`\n\nWORKFLOW:\n1. Resolve `data_path = pre_engineering_data_path if available else current_data_path`\n2. Resolve output path: `os.path.join(phase1_intermediate_latest, 'engineered', 'temp_ratios.csv')`\n3. Call:\n```python\nresult = generate_reaction_ratios(\n    data_path=data_path,\n    output_path=os.path.join(phase1_intermediate_latest, 'engineered', 'temp_ratios.csv'),\n    include_label=False,\n)\n```\n4. Check `result['status'] == 'success'`\n5. Update state with:\n   - `temp_ratios_path`\n   - `n_ratio_features`\n   - `engineered_feature_registry_path` if returned\n\n**IMPORTANT BEHAVIOR**:\n- The generator uses `ReactionCheckerTool().find_connected_pairs()` internally\n- It only keeps direct biochemical reaction pairs\n- Because the matrix is already log2-transformed, ratio values are generated as stable log-ratio differences (`A - B`)\n- It applies basic quality filters for missingness and near-constant features\n- It updates the engineered feature registry automatically\n\n**EXAMPLE CODE**:\n```python\nimport os\nimport json\nfrom src.tools.domain.feature_generator import generate_reaction_ratios\n\ncfg_data_path = pre_engineering_data_path if pre_engineering_data_path else current_data_path\noutput_path = os.path.join(phase1_intermediate_latest, 'engineered', 'temp_ratios.csv')\n\nresult = generate_reaction_ratios(\n    data_path=cfg_data_path,\n    output_path=output_path,\n    include_label=False,\n)\n\nif result['status'] != 'success':\n    raise ValueError(result['message'])\n\nprint(json.dumps({\n    '__METABO_UPDATE__': {\n        'temp_ratios_path': result['output_path'],\n        'n_ratio_features': result['num_ratios'],\n        'engineered_feature_registry_path': result.get('registry_path')\n    }\n}))\n```\n",
+          "lib_hint": "src.tools.domain.feature_generator, os, json",
+          "context_files": [
+            "pre_engineering_data_path",
+            "current_data_path"
+          ],
+          "outputs": [
+            "temp_ratios_path"
+          ],
+          "reasoning": "放弃低效的循环盲猜，采用图网络交集反查，确保O(N)调用复杂度，100%覆盖真实的生物学反应网络。"
+        },
+        {
+          "step_id": "1.5.2",
+          "action": "coding_task",
+          "instruction": "Generate Controlled Taxonomy Sum Features Using Feature Generator",
+          "details": "Import `generate_taxonomy_sums` from `src.tools.domain.feature_generator`.\n\nTASK: Generate directionally consistent taxonomy-based burden features from the pre-engineering matrix using the centralized feature generator.\n\n**CRITICAL: Use pre_engineering_data_path when available**\n- Resolve `data_path = pre_engineering_data_path if available else current_data_path`\n- Do NOT manually sum every taxonomy group inside ad-hoc SOP code\n- Do NOT keep every raw taxonomy group by default\n\nREQUIRED TOOL: You MUST call `generate_taxonomy_sums(...)`.\nImport: `from src.tools.domain.feature_generator import generate_taxonomy_sums`\n\nWORKFLOW:\n1. Resolve `data_path = pre_engineering_data_path if available else current_data_path`\n2. Resolve output path: `os.path.join(phase1_intermediate_latest, 'engineered', 'temp_sums.csv')`\n3. Call:\n```python\nresult = generate_taxonomy_sums(\n    data_path=data_path,\n    output_path=os.path.join(phase1_intermediate_latest, 'engineered', 'temp_sums.csv'),\n    include_label=False,\n)\n```\n4. Check `result['status'] == 'success'`\n5. Update state with:\n   - `temp_sums_path`\n   - `n_sum_features`\n   - `engineered_feature_registry_path` if returned\n\n**IMPORTANT BEHAVIOR**:\n- The generator still starts from taxonomy grouping, but does NOT keep all groups blindly\n- It filters groups using configured rules such as excluded labels, minimum informative members, and direction consistency\n- Direction consistency is computed from the current labeled dataset, not from an external disease-direction database\n- It retains only the dominant-direction members and trims overly large groups\n- It updates the engineered feature registry automatically\n\n**EXAMPLE CODE**:\n```python\nimport os\nimport json\nfrom src.tools.domain.feature_generator import generate_taxonomy_sums\n\ncfg_data_path = pre_engineering_data_path if pre_engineering_data_path else current_data_path\noutput_path = os.path.join(phase1_intermediate_latest, 'engineered', 'temp_sums.csv')\n\nresult = generate_taxonomy_sums(\n    data_path=cfg_data_path,\n    output_path=output_path,\n    include_label=False,\n)\n\nif result['status'] != 'success':\n    raise ValueError(result['message'])\n\nprint(json.dumps({\n    '__METABO_UPDATE__': {\n        'temp_sums_path': result['output_path'],\n        'n_sum_features': result['num_sums'],\n        'engineered_feature_registry_path': result.get('registry_path')\n    }\n}))\n```\n",
+          "lib_hint": "src.tools.domain.feature_generator, os, json",
+          "context_files": [
+            "pre_engineering_data_path",
+            "current_data_path"
+          ],
+          "outputs": [
+            "temp_sums_path"
+          ],
+          "reasoning": "使用专门的工具函数，确保只生成基于分类学的求和特征。"
+        },
+        {
+          "step_id": "1.5.3",
+          "action": "coding_task",
+          "instruction": "Generate Coverage-Gated Pathway Scores Using Feature Generator",
+          "details": "Import `generate_pathway_scores` from `src.tools.domain.feature_generator`.\n\nTASK: Generate pathway activity scores from the pre-engineering matrix using Phase 0 target pathways plus a strict observed-members coverage gate.\n\n**CRITICAL: Use pre_engineering_data_path when available**\n- Resolve `data_path = pre_engineering_data_path if available else current_data_path`\n- Default pathway candidates should come from `phase0_output.feature_definitions.target_pathways`\n- Do NOT score every possible pathway in the resource database\n- `generate_pathway_scores(...)` returns a Python `dict`, NOT a JSON string; do NOT call `json.loads(result)` on it\n- If no pathway candidates are available, or no pathway passes the coverage gate, this step should still succeed by emitting an empty temporary file with `n_pathway_scores = 0`\n\nREQUIRED TOOL: You MUST call `generate_pathway_scores(...)`.\nImport: `from src.tools.domain.feature_generator import generate_pathway_scores`\n\nWORKFLOW:\n1. Resolve `data_path = pre_engineering_data_path if available else current_data_path`\n2. Resolve output path: `os.path.join(phase1_intermediate_latest, 'engineered', 'temp_pathway_scores.csv')`\n3. Call `generate_pathway_scores(...)` directly and treat the return value as a dict\n4. If `result['status'] != 'success'` AND `result.get('message', '')` is not one of the expected empty-pathway messages, raise an error\n5. Otherwise update state with:\n   - `temp_pathways_path`\n   - `n_pathway_scores`\n   - `engineered_feature_registry_path` if returned\n\n**IMPORTANT BEHAVIOR**:\n- The generator only uses Phase 0 target pathways unless an explicit list is provided\n- It filters pathways by observed HMDB member count and coverage ratio before scoring\n- It only computes scores for pathways that pass the coverage gate\n- It records both all theoretical members and observed members in the engineered feature registry\n- It writes an empty temporary file if no pathways pass the gate, so downstream merge logic remains stable\n\n**EXAMPLE CODE**:\n```python\nimport os\nimport json\nfrom src.tools.domain.feature_generator import generate_pathway_scores\n\ncfg_data_path = pre_engineering_data_path if pre_engineering_data_path else current_data_path\noutput_path = os.path.join(phase1_intermediate_latest, 'engineered', 'temp_pathway_scores.csv')\nphase0_output = context_variables.get('phase0_output') if isinstance(context_variables.get('phase0_output'), dict) else None\n\nresult = generate_pathway_scores(\n    data_path=cfg_data_path,\n    output_path=output_path,\n    phase0_output=phase0_output,\n    include_label=False,\n)\n\nmessage = str(result.get('message', '') or '')\nif result['status'] != 'success' and 'No pathway candidates available' not in message:\n    raise ValueError(message)\n\nprint(json.dumps({\n    '__METABO_UPDATE__': {\n        'temp_pathways_path': result.get('output_path', output_path),\n        'n_pathway_scores': int(result.get('num_pathways', 0) or 0),\n        'engineered_feature_registry_path': result.get('registry_path')\n    }\n}))\n```\n",
+          "lib_hint": "src.tools.domain.feature_generator, os, json",
+          "context_files": [
+            "pre_engineering_data_path",
+            "current_data_path",
+            "phase0_output.json"
+          ],
+          "outputs": [
+            "temp_pathways_path"
+          ],
+          "reasoning": "独立执行，基于原始数据计算。"
+        },
+        {
+          "step_id": "1.5.4",
+          "action": "coding_task",
+          "instruction": "Verify Feature Integration",
+          "details": "TASK: Merge all engineered features with the base dataset using the centralized feature-generator merge entrypoint, then save the complete pre-scaled dataset.\n\n**CRITICAL**: This step MUST call `merge_engineered_features(...)` from `src.tools.domain.feature_generator`. Do NOT manually read the temp ratio/sum/pathway CSVs and do NOT infer feature counts from `DataFrame.shape[1]`, because join keys or placeholder columns can inflate the counts.\n\nWORKFLOW:\n1. Resolve `base_data_path = pre_engineering_data_path if available else current_data_path`\n2. Resolve temp engineered file paths under `os.path.join(phase1_intermediate_latest, 'engineered')`\n3. Call:\n```python\nfrom src.tools.domain.feature_generator import merge_engineered_features\n\nresult = merge_engineered_features(\n    base_data_path=base_data_path,\n    ratio_path=os.path.join(engineered_dir, 'temp_ratios.csv'),\n    taxonomy_path=os.path.join(engineered_dir, 'temp_sums.csv'),\n    pathway_path=os.path.join(engineered_dir, 'temp_pathway_scores.csv'),\n    output_path=os.path.join(engineered_dir, 'data_with_engineered_features.csv'),\n    metadata_path=os.path.join(engineered_dir, 'feature_metadata.json'),\n)\n```\n4. Check `result['status'] == 'success'`\n5. Read real counts from `result['feature_breakdown']`:\n   - `original`\n   - `ratio`\n   - `taxonomy_sum`\n   - `pathway_score`\n6. Save/update `feature_pool.csv` using real feature columns only (exclude target/sample-id/internal join keys)\n7. Update state with:\n   - `current_data_path`\n   - `enriched_data_path`\n   - `unscaled_enriched_data_path`\n   - `n_total_features`\n   - `n_original_features`\n   - `n_ratio_features`\n   - `n_sum_features`\n   - `n_pathway_scores`\n   - `feature_pool_path`\n   - `engineered_features_merged=True`\n8. Clean up temporary files if desired\n\n**IMPORTANT BEHAVIOR**:\n- `merge_engineered_features(...)` automatically ignores sample-id / label / internal join columns when counting engineered features\n- `__row_id__` is only an internal join key and must never be counted as a feature\n- If a temp feature file contains zero engineered columns, the merge still remains stable\n- `unscaled_enriched_data_path` is the leakage-safe split source for Step 5.0 and must remain an unscaled snapshot\n\n**EXAMPLE CODE**:\n```python\nimport os\nimport json\nimport pandas as pd\nfrom src.tools.domain.feature_generator import merge_engineered_features\n\nbase_data_path = pre_engineering_data_path if pre_engineering_data_path else current_data_path\nengineered_dir = os.path.join(phase1_intermediate_latest, 'engineered')\noutput_path = os.path.join(engineered_dir, 'data_with_engineered_features.csv')\nmetadata_path = os.path.join(engineered_dir, 'feature_metadata.json')\n\nresult = merge_engineered_features(\n    base_data_path=base_data_path,\n    ratio_path=os.path.join(engineered_dir, 'temp_ratios.csv'),\n    taxonomy_path=os.path.join(engineered_dir, 'temp_sums.csv'),\n    pathway_path=os.path.join(engineered_dir, 'temp_pathway_scores.csv'),\n    output_path=output_path,\n    metadata_path=metadata_path,\n)\n\nif result['status'] != 'success':\n    raise ValueError(result['message'])\n\nbreakdown = result['feature_breakdown']\nmerged_df = pd.read_csv(result['output_path'])\nfeature_pool = [\n    c for c in merged_df.columns\n    if c not in ['Sample_ID', 'sample_id', 'SampleID', 'sampleid', 'ROW_ID', 'row_id', '__row_id__', target_column]\n]\n\nprint(json.dumps({\n    '__METABO_UPDATE__': {\n        'current_data_path': result['output_path'],\n        'enriched_data_path': result['output_path'],\n        'unscaled_enriched_data_path': result['output_path'],\n        'n_total_features': result['num_features'],\n        'n_original_features': breakdown.get('original', 0),\n        'n_ratio_features': breakdown.get('ratio', 0),\n        'n_sum_features': breakdown.get('taxonomy_sum', 0),\n        'n_pathway_scores': breakdown.get('pathway_score', 0),\n        'engineered_features_merged': True,\n    }\n}))\n```\n",
+          "lib_hint": "pandas, json",
+          "context_files": [
+            "pre_engineering_data_path",
+            "current_data_path"
+          ],
+          "outputs": [
+            "enriched_data_path",
+            "feature_metadata_json"
+          ],
+          "reasoning": "验证所有特征已正确集成，确保数据完整性。"
+        },
+        {
+          "step_id": "1.5.5",
+          "action": "coding_task",
+          "instruction": "Auto-Scale Merged Dataset for Downstream Feature Selection",
+          "details": "TASK: Apply auto-scaling ONLY AFTER all engineered features have been merged.\n\n**CRITICAL REQUIREMENT**: Ratio/sum/pathway features must already exist in the current merged dataset before this step runs.\n\n**LEAKAGE-GUARD RULE**:\n- `unscaled_enriched_data_path` is the canonical pre-scaled engineered snapshot for Step 5.0 train/holdout splitting.\n- This step may update `current_data_path` / `scaled_merged_data_path` for legacy downstream consumers, but MUST NOT overwrite or repurpose `unscaled_enriched_data_path`.\n- Step 5.0 must split from `unscaled_enriched_data_path`, not from the globally scaled matrix produced here.\n\n**WORKFLOW**:\n1. Load the merged dataset from `current_data_path`\n2. Identify protected columns dynamically: sample_id_column (if exists), target_column, batch_column\n3. Apply `auto_scaling_tool(data_path=current_data_path, columns=None, method='standard')`\n4. Save/update the scaled merged matrix\n5. Update state with:\n   - `scaled_merged_data_path`\n   - `current_data_path`\n6. Preserve both `enriched_data_path` and `unscaled_enriched_data_path` as the pre-scaled engineered dataset for traceability and leakage-safe splitting\n\n**COMPLETE CODE EXAMPLE**:\n```python\nimport json\nfrom src.tools.analysis.data_analysis_tools import auto_scaling_tool\n\nunscaled_enriched_data_path = context_variables.get('unscaled_enriched_data_path', current_data_path)\nresult_json = auto_scaling_tool(data_path=current_data_path, columns=None, method='standard')\nresult = json.loads(result_json)\n\nif not result['success']:\n    raise ValueError(f\"Auto-scaling failed: {result['error']}\")\n\nscaled_path = result['output_path']\nprint(json.dumps({\n    '__METABO_UPDATE__': {\n        'scaled_merged_data_path': scaled_path,\n        'current_data_path': scaled_path,\n        'unscaled_enriched_data_path': unscaled_enriched_data_path\n    }\n}))\n```\n\n**CRITICAL RULES**:\n- DO NOT generate new engineered features in this step\n- DO NOT re-run log2 or outlier capping in this step\n- DO NOT let Step 5.0 use `scaled_merged_data_path` as the split source\n- This step exists solely to prepare the merged matrix for legacy downstream consumers while preserving a leakage-safe split source\n",
+          "lib_hint": "pandas, json, os, src.utils.feature_name_standardizer",
+          "context_files": [
+            "current_data_path",
+            "target_column"
+          ],
+          "outputs": [
+            "scaled_merged_data_path"
+          ],
+          "reasoning": "将 auto-scaling 延后到 engineered features 合并之后，既保留了组合特征的生物学语义，也保证 downstream selector 使用统一尺度矩阵。"
+        }
+      ],
+      "id": 1.5
+    },
+    {
+      "stage_id": 2,
+      "name": "Univariate Analysis (单变量统计)",
+      "condition": "run_traditional_stats == true",
+      "steps": [
+        {
+          "step_id": "2.1",
+          "action": "coding_task",
+          "instruction": "Execute Comprehensive Univariate Analysis",
+          "details": "Import `scipy.stats`, `statsmodels.stats.multitest`. Load `enriched_data_path`. Loop features: Normality Test -> T-test/Mann-Whitney -> Log2FC -> FDR Correction. Identify candidates (Adj.P<0.05, |FC|>1.5). Save results `univariate_results.csv` and candidate list.",
+          "lib_hint": "scipy.stats, statsmodels, pandas, numpy",
+          "context_files": [
+            "enriched_data_path",
+            "target_column"
+          ],
+          "outputs": [
+            "univariate_results_path",
+            "uva_candidate_features"
+          ],
+          "reasoning": "原子化统计分析，使用标准库。"
+        }
+      ],
+      "id": 2
+    },
+    {
+      "stage_id": 3,
+      "name": "Multivariate Analysis (多变量统计)",
+      "condition": "run_traditional_stats == true",
+      "steps": [
+        {
+          "step_id": "3.1",
+          "action": "coding_task",
+          "instruction": "Perform PCA Analysis (NO VISUALIZATION)",
+          "details": "Import sklearn.decomposition.PCA and sklearn.preprocessing.StandardScaler.\n\nTASK: Perform Principal Component Analysis on the merged features dataset.\n\nWORKFLOW:\n1. Load data from current_data_path\n2. Separate features (exclude protected columns (ID/target columns))\n3. Standardize features using StandardScaler\n4. Fit PCA and transform data\n5. Calculate explained variance\n6. Save PCA scores and loadings to CSV files\n\nCRITICAL CONSTRAINTS:\n- DO NOT import matplotlib or seaborn (these libraries are not installed)\n- DO NOT create any visualizations\n- Convert numpy arrays to Python lists using .tolist() before JSON serialization\n- Convert numpy integers/floats to Python int/float before JSON serialization\n\nOUTPUT FILES:\n- 'output/phase1/intermediate/latest/pca_analysis/pca_scores.csv': PCA scores with optional ID column and target column\n- 'output/phase1/intermediate/latest/pca_analysis/pca_loadings.csv': PCA loadings (features × components)\n- 'output/phase1/intermediate/latest/pca_analysis/pca_variance.json': Explained variance ratios\n\nSTATE UPDATE:\nUpdate state with:\n- pca_scores_path: path to scores file\n- pca_loadings_path: path to loadings file\n- n_components: number of components (convert to int)\n- total_variance_explained: sum of variance ratios (convert to float)\n\nEXAMPLE CODE STRUCTURE:\n```python\nimport pandas as pd\nimport numpy as np\nfrom sklearn.decomposition import PCA\nfrom sklearn.preprocessing import StandardScaler\nimport json\nimport os\n\nos.makedirs('output/phase1/intermediate/latest/pca_analysis', exist_ok=True)\n\n# Load and prepare data\ndf = pd.read_csv(current_data_path)\nprotected_columns = [c for c in ['Sample_ID','sample_id','SampleID','sampleid', target_column] if c in df.columns]\nfeature_cols = [col for col in df.columns if col not in protected_columns]\nX = df[feature_cols].values\n\n# Standardize\nscaler = StandardScaler()\nX_scaled = scaler.fit_transform(X)\n\n# PCA\npca = PCA()\nX_pca = pca.fit_transform(X_scaled)\n\n# Save scores (with Sample_ID and Group)\nscores_df = pd.DataFrame(\n    X_pca, \n    columns=[f'PC{i+1}' for i in range(X_pca.shape[1])]\n)\nscores_df.insert(0, 'Sample_ID', df['Sample_ID'].values)\nscores_df.insert(1, 'Group', df['Group'].values)\nscores_df.to_csv('output/phase1/intermediate/latest/pca_analysis/pca_scores.csv', index=False)\n\n# Save loadings\nloadings_df = pd.DataFrame(\n    pca.components_.T,\n    columns=[f'PC{i+1}' for i in range(pca.n_components_)],\n    index=feature_cols\n)\nloadings_df.to_csv('output/phase1/intermediate/latest/pca_analysis/pca_loadings.csv')\n\n# Save variance (convert numpy to list)\nvariance_data = {\n    'explained_variance_ratio': pca.explained_variance_ratio_.tolist(),\n    'cumulative_variance': np.cumsum(pca.explained_variance_ratio_).tolist()\n}\nwith open('output/phase1/intermediate/latest/pca_analysis/pca_variance.json', 'w') as f:\n    json.dump(variance_data, f, indent=2)\n\n# Update state (convert numpy types to Python types)\nstate_update = {\n    'pca_scores_path': 'output/phase1/intermediate/latest/pca_analysis/pca_scores.csv',\n    'pca_loadings_path': 'output/phase1/intermediate/latest/pca_analysis/pca_loadings.csv',\n    'pca_variance_path': 'output/phase1/intermediate/latest/pca_analysis/pca_variance.json',\n    'n_components': int(pca.n_components_),\n    'total_variance_explained': float(pca.explained_variance_ratio_.sum())\n}\nprint(json.dumps({'__METABO_UPDATE__': state_update}))\n```\n\n\nCONFIG-FIRST TEMPLATE (for all paths in this step):\n```python\nimport os\nfrom src.utils.config_manager import get_config\ncfg = get_config()\nphase1_intermediate_latest = cfg.get_phase1_path('intermediate_latest_dir') or 'output/phase1/intermediate/latest'\nphase1_artifacts_dir = cfg.get_phase1_path('artifacts_dir') or 'output/phase1/artifacts'\nphase1_final_dir = cfg.get_phase1_path('final_dir') or 'output/phase1/final'\n```\n",
+          "lib_hint": "sklearn.decomposition, sklearn.preprocessing, pandas, numpy, json",
+          "context_files": [
+            "enriched_data_path"
+          ],
+          "outputs": [
+            "pca_results_path"
+          ],
+          "reasoning": "无监督概览。"
+        },
+        {
+          "step_id": "3.2",
+          "action": "coding_task",
+          "instruction": "Execute Supervised Modeling (PLS-DA)",
+          "details": "Import `sklearn.cross_decomposition.PLSRegression`. Fit PLS-DA. Run Permutation Test (n=200) for validation. Extract VIP scores (>1.0). Save metrics and VIP list.",
+          "lib_hint": "sklearn, numpy, pandas",
+          "context_files": [
+            "enriched_data_path",
+            "target_column"
+          ],
+          "outputs": [
+            "mva_results_path",
+            "mva_candidate_features"
+          ],
+          "reasoning": "有监督分析与特征重要性提取。"
+        }
+      ],
+      "id": 3
+    },
+    {
+      "stage_id": 4,
+      "name": "Biomarker Definition (差异物定义)",
+      "condition": "run_traditional_stats == true",
+      "steps": [
+        {
+          "step_id": "4.1",
+          "action": "coding_task",
+          "instruction": "Intersect Candidates and Decide",
+          "details": "Intersect `uva_candidate_features` and `mva_candidate_features`. Save as `differential_metabolites`. Based on `user_intent`, decide `proceed_to_ml`.",
+          "lib_hint": "python built-in",
+          "context_files": [
+            "uva_candidate_features",
+            "mva_candidate_features",
+            "user_intent"
+          ],
+          "outputs": [
+            "differential_metabolites",
+            "proceed_to_ml"
+          ],
+          "reasoning": "经典标准 (P<0.05 & VIP>1)。"
+        }
+      ],
+      "id": 4
+    },
+    {
+      "stage_id": 5,
+      "name": "Feature Selection (特征选择)",
+      "description": "自适应特征筛选，支持本地代码闭环控制。",
+      "condition": "run_ml_pipeline == true",
+      "steps": [
+        {
+          "step_id": "5.0",
+          "action": "coding_task",
+          "instruction": "Define Candidate Universe and Audit Balance",
+          "details": "TASK: Identify mandatory features (prior biomarkers) and validate they exist in dataset.\n\n**CRITICAL: Only return features that exist in the dataset**\n\nWORKFLOW:\n1. Load dataset to get actual column names\n2. Load Phase 0 prior biomarkers from context\n3. Use metabolite_name_mapper to match biomarkers to dataset columns\n4. **VALIDATE**: Filter to only features that exist in dataset\n5. Report matching statistics\n6. Save validated mandatory features to context\n\n**COMPLETE CODE EXAMPLE**:\n```python\nimport json\nimport pandas as pd\nimport os\n\ntry:\n    # Load dataset\n    data_path = current_data_path  # From context\n    df = pd.read_csv(data_path)\n    target_column = context_variables.get('target_column', 'Group')\n    \n    # ========================================================================\n    # PART 1: Determine Feature Pool\n    # ========================================================================\n    \n    # Check if differential_metabolites.csv exists\n    diff_path = \"differential_metabolites.csv\"\n    \n    if os.path.exists(diff_path):\n        # Use differential features\n        diff_df = pd.read_csv(diff_path)\n        \n        # Robust column name detection\n        if 'Feature' in diff_df.columns:\n            feature_pool = diff_df['Feature'].tolist()\n        elif 'metabolite_name' in diff_df.columns:\n            feature_pool = diff_df['metabolite_name'].tolist()\n        elif 'Metabolite' in diff_df.columns:\n            feature_pool = diff_df['Metabolite'].tolist()\n        elif len(diff_df.columns) > 0 and len(diff_df) > 0:\n            # Use first column if it has data\n            feature_pool = diff_df.iloc[:, 0].tolist()\n        else:\n            # File is empty, use all features\n            feature_pool = [col for col in df.columns if col not in [c for c in ['Sample_ID','sample_id','SampleID','sampleid','__row_id__','ROW_ID','row_id', target_column] if c in df.columns]]\n    else:\n        # Use all numeric features (exclude protected columns and internal technical keys)\n        feature_pool = [col for col in df.columns if col not in [c for c in ['Sample_ID','sample_id','SampleID','sampleid','__row_id__','ROW_ID','row_id', target_column] if c in df.columns]]\n    \n    # Filter to only features that exist in the dataset\n    feature_pool = [f for f in feature_pool if f in df.columns]\n    \n    # Save feature pool\n    feature_pool_df = pd.DataFrame({'Feature': feature_pool})\n    feature_pool_df.to_csv(os.path.join(phase1_intermediate_latest, 'feature_selection', 'feature_pool.csv'), index=False)\n    \n    print(f\"\\n=== Feature Pool Summary ===\")\n    print(f\"Total features in pool: {len(feature_pool)}\")\n    \n    # ========================================================================\n    # PART 2: Check Class Balance\n    # ========================================================================\n    \n    class_counts = df[target_column].value_counts()\n    ratio_raw = class_counts.max() / class_counts.min()\n    is_balanced_raw = ratio_raw <= 2.0\n    \n    # CRITICAL: Convert to Python native types\n    ratio = float(ratio_raw)\n    is_balanced = bool(is_balanced_raw)\n    \n    print(f\"\\n=== Class Balance ===\")\n    print(f\"Class balance ratio: {ratio:.2f}\")\n    print(f\"Is balanced: {is_balanced}\")\n    print(f\"Class counts: {dict(class_counts)}\")\n    \n    # ========================================================================\n    # PART 3: Identify Mandatory Features (Prior Biomarkers) with Validation\n    # ========================================================================\n    \n    # Extract Phase 0 prior biomarkers from context\n    phase0_biomarkers = context_variables.get('phase0_output', {}).get('confirmed_biomarkers', [])\n    \n    print(f\"\\n=== Prior Biomarker Matching (with Dataset Validation) ===\")\n    print(f\"Phase 0 confirmed biomarkers: {len(phase0_biomarkers)}\")\n    \n    if phase0_biomarkers:\n        try:\n            from src.tools.domain.metabolite_name_mapper_enhanced import map_prior_biomarkers_to_columns\n            \n            # Get all feature columns (exclude protected columns)\n            feature_columns = [col for col in df.columns if col not in [c for c in ['Sample_ID','sample_id','SampleID','sampleid','__row_id__','ROW_ID','row_id', target_column] if c in df.columns]]\n            \n            # Match prior biomarkers to dataset columns\n            matched_features, mapping_report = map_prior_biomarkers_to_columns(\n                phase0_biomarkers,\n                feature_columns\n            )\n            \n            print(f\"\\nInitial matching: {len(matched_features)} features\")\n            \n            # ✅ CRITICAL: Validate that all matched features exist in dataset\n            dataset_columns = set(df.columns)\n            validated_mandatory = [f for f in matched_features if f in dataset_columns]\n            invalid_mandatory = [f for f in matched_features if f not in dataset_columns]\n            \n            if invalid_mandatory:\n                print(f\"\\n⚠ Warning: {len(invalid_mandatory)} mapped features not found in dataset:\")\n                for feat in invalid_mandatory[:5]:\n                    print(f\"  - {feat}\")\n                if len(invalid_mandatory) > 5:\n                    print(f\"  ... and {len(invalid_mandatory) - 5} more\")\n                print(f\"\\nThese features will be EXCLUDED from mandatory features.\")\n            \n            # ✅ CRITICAL: Use only validated features\n            mandatory_features = validated_mandatory\n            \n            print(f\"\\n✓ Validated mandatory features: {len(mandatory_features)}/{len(matched_features)}\")\n            print(f\"Match rate: {len(mandatory_features)/len(phase0_biomarkers)*100:.1f}%\")\n            \n            if mandatory_features:\n                print(f\"\\nValidated mandatory features:\")\n                for i, feat in enumerate(mandatory_features[:10], 1):\n                    print(f\"  {i}. {feat}\")\n                if len(mandatory_features) > 10:\n                    print(f\"  ... and {len(mandatory_features) - 10} more\")\n            \n            if mapping_report.get('unmatched_metabolites'):\n                unmatched = mapping_report['unmatched_metabolites']\n                print(f\"\\nUnmatched biomarkers: {len(unmatched)}\")\n                for biomarker in unmatched[:3]:\n                    print(f\"  - {biomarker}\")\n                if len(unmatched) > 3:\n                    print(f\"  ... and {len(unmatched) - 3} more\")\n            \n        except Exception as e:\n            print(f\"Warning: Could not match prior biomarkers: {str(e)}\")\n            print(f\"Continuing without mandatory features...\")\n            mandatory_features = []\n    else:\n        print(\"No prior biomarkers from Phase 0\")\n        mandatory_features = []\n    \n    # ========================================================================\n    # PART 4: Prepare State Update\n    # ========================================================================\n    \n    state_update = {\n        'is_balanced': is_balanced,\n        'feature_pool_path': os.path.join(phase1_intermediate_latest, 'feature_selection', 'feature_pool.csv'),\n        'n_features_in_pool': int(len(feature_pool)),\n        'class_ratio': ratio,\n        'class_counts': {str(k): int(v) for k, v in class_counts.items()},\n        'mandatory_features': mandatory_features,\n        'n_mandatory_features': len(mandatory_features)\n    }\n    \n    print(json.dumps({'__METABO_UPDATE__': state_update}))\n    \n    print(f\"\\n=== Step 5.0 Complete ===\")\n    print(f\"Feature pool: {len(feature_pool)} features\")\n    print(f\"Mandatory features: {len(mandatory_features)} features (VALIDATED)\")\n    print(f\"Class balance: {'Balanced' if is_balanced else 'Imbalanced'}\")\n\nexcept Exception as e:\n    error_report = {\n        \"__METABO_UPDATE__\": {\n            \"error\": f\"Error: {str(e)}\",\n            \"error_type\": \"execution_error\"\n        }\n    }\n    print(json.dumps(error_report))\n    raise\n```\n\n**KEY CHANGES**:\n1. ✅ Added explicit validation: `validated_mandatory = [f for f in matched_features if f in dataset_columns]`\n2. ✅ Report invalid features with warning\n3. ✅ **CRITICAL**: Use `mandatory_features = validated_mandatory` (not the unvalidated list)\n4. ✅ Clear logging of validation results\n\n**EXPECTED BEHAVIOR**:\n- Only features that exist in dataset are returned\n- Invalid features are reported but excluded\n- Retention rate calculation is based on validated features only\n\n**EXAMPLE OUTPUT**:\n```\nPhase 0 confirmed biomarkers: 36\nInitial matching: 16 features\n\n⚠ Warning: 10 mapped features not found in dataset:\n  - Carnosine\n  - HMDB0000064\n  - Choline\n  - HMDB0000157\n  - HMDB0000158\n  ... and 5 more\n\nThese features will be EXCLUDED from mandatory features.\n\n✓ Validated mandatory features: 6/16\nMatch rate: 16.7%\n\nValidated mandatory features:\n  1. HMDB0000043\n  2. Deoxyadenosine\n  3. HMDB0000054\n  4. 8-Hydroxy-deoxyguanosine\n  5. HMDB0000168\n  6. N(6),N(6)-Dimethyl-lysine\n```\n\n\n**CRITICAL DATA PATH RULE**:\n- `current_data_path` / `data_path` MUST remain the sample matrix file containing all samples and the target column.\n- `feature_pool.csv` is ONLY a feature-name list for reference.\n- NEVER assign `current_data_path = feature_pool_path`.\n",
+          "implementation_contract": "Programmatic node defines the candidate universe on the train pool, exports `candidate_universe.csv` and `candidate_universe_metadata.json`, keeps Phase 0 prior biomarkers protected in `mandatory_features`, records fixed selector-family / fixed-width defaults, and uses `is_balanced` only as an audit/router flag rather than a methodology switch.",
+          "lib_hint": "pandas, numpy, json",
+          "context_files": [
+            "current_data_path",
+            "train_pool_data_path",
+            "holdout_data_path",
+            "mandatory_features",
+            "phase0_output"
+          ],
+          "outputs": [
+            "train_pool_data_path",
+            "holdout_data_path",
+            "candidate_universe_path",
+            "candidate_universe_metadata_path",
+            "mandatory_features",
+            "n_mandatory_features",
+            "phase1_selector_family",
+            "phase1_stability_iterations",
+            "phase1_per_method_select_k",
+            "phase1_final_panel_target_size",
+            "is_balanced",
+            "class_ratio",
+            "class_counts"
+          ],
+          "reasoning": "固定候选宇宙、保护 prior，并为统一的 train-only 稳定性选择准备输入。"
+        },
+        {
+          "step_id": "5.2.1",
+          "action": "coding_task",
+          "instruction": "Train-Only Stability Selection (Unified Pipeline)",
+          "details": "TASK: Execute the unified Phase 1 train-only stability pipeline.\n\nRULES:\n- Use only the Step 5.0 train pool from `train_pool_data_path` / `current_data_path`.\n- Do not pass `feature_pool.csv` or `candidate_universe.csv` into selector functions.\n- Do not use legacy threshold schedules, adaptive voting, widest-union fallback, or any secondary panel.\n- `mandatory_features` stores protected prior biomarkers and must stay preserved.\n\nMANDATORY SEQUENCE:\n- Call `run_train_only_stability_selection(...)` first.\n- Then call `build_stable_panel_from_logs(...)`.\n- Persist the single final Phase 1 panel to `temp_consensus_features.json`.\n- Persist strategy metadata as `train_only_stability_panel`.\n",
+          "implementation_contract": "Execute a single unified train-only stability pipeline with fixed selector family, fixed-width per-method selection, stable-core scoring, single final panel completion, and protected priors. Do not branch on `is_balanced`, and do not re-introduce separate balanced/imbalanced methodologies, legacy multi-threshold voting, adaptive widest-union fallback, or secondary-panel generation.",
+          "details_override": "TASK: Execute the unified Phase 1 train-only stability pipeline.\n\nRULES:\n- Use only the Step 5.0 train pool from `train_pool_data_path` / `current_data_path`.\n- Do not pass `feature_pool.csv` or `candidate_universe.csv` into selector functions.\n- Do not use legacy threshold schedules, adaptive voting, widest-union fallback, or any secondary panel.\n- `mandatory_features` stores protected prior biomarkers and must stay preserved.\n\nMANDATORY SEQUENCE:\n- Call `run_train_only_stability_selection(...)` first.\n- Then call `build_stable_panel_from_logs(...)`.\n- Persist the single final Phase 1 panel to `temp_consensus_features.json`.\n- Persist strategy metadata as `train_only_stability_panel`.\n",
+          "lib_hint": "src.tools.analysis.feature_selection_tools, json, os",
+          "context_files": [
+            "train_pool_data_path",
+            "candidate_universe_path",
+            "mandatory_features",
+            "phase1_selector_family",
+            "phase1_stability_iterations",
+            "phase1_per_method_select_k",
+            "phase1_final_panel_target_size"
+          ],
+          "outputs": [
+            "consensus_features",
+            "final_selected_features",
+            "stable_core_features",
+            "stability_summary_path",
+            "stability_scores_path",
+            "phase1_panel_selection_path",
+            "n_features_selected",
+            "n_methods_used"
+          ],
+          "reasoning": "统一执行单一的 train-only 稳定性选择方案，不再区分 balanced / imbalanced 路由。"
+        },
+        {
+          "step_id": "5.2.2",
+          "action": "coding_task",
+          "instruction": "Audit Stability Scores and Stable Core",
+          "details": "TASK: Calculate consensus features based on the selection strategy used in Step 5.2.1.\n\n**CANONICAL-FIRST RULE**:\n- First try to reuse `temp_consensus_features.json` if Step 5.2.1 already produced it.\n- For `voting` strategy, the canonical upstream file is `output/phase1/intermediate/latest/feature_selection/method_results.json`.\n- For `stability` strategy, the canonical upstream source is `temp_stability_frequencies.json` or `calculate_frequencies_from_logs(stability_temp_dir)`.\n- Legacy files like `temp_rf_features.json`, `temp_lasso_features.json`, `temp_mrmr_features.json` are last-resort fallback only. Their absence must NOT cause failure when canonical files exist.\n\n```python\nimport json\nimport os\nfrom src.tools.analysis.feature_selection_tools import (\n    calculate_frequencies_from_logs,\n    get_adaptive_consensus_features\n)\n\nprint(\"\\n=== Step 5.2.2: Calculate Consensus Features from Selection Results ===\")\n\nstrategy_path = os.path.join(phase1_intermediate_latest, 'feature_selection', 'temp_selection_strategy.json')\nconsensus_path = os.path.join(phase1_intermediate_latest, 'feature_selection', 'temp_consensus_features.json')\nmethod_results_path = os.path.join(phase1_intermediate_latest, 'feature_selection', 'method_results.json')\nstability_freq_path = os.path.join(phase1_intermediate_latest, 'feature_selection', 'temp_stability_frequencies.json')\n\nwith open(strategy_path, 'r') as f:\n    strategy_data = json.load(f)\nstrategy = strategy_data['strategy']\nprint(f\"[Strategy] {strategy}\")\n\n# Fast path: if Step 5.2.1 already produced consensus features, reuse them directly.\nif os.path.exists(consensus_path):\n    with open(consensus_path, 'r') as f:\n        existing_consensus = json.load(f)\n    if isinstance(existing_consensus, list) and len(existing_consensus) > 0:\n        print(f\"[Reuse] Found existing consensus features: {len(existing_consensus)}\")\n        print(json.dumps({'__METABO_UPDATE__': {\n            'consensus_features': existing_consensus,\n            'n_features_selected': len(existing_consensus),\n            'selection_strategy': strategy,\n            'consensus_strategy': strategy_data.get('details', f'reused_{strategy}_consensus')\n        }}))\n        raise SystemExit(0)\n\nfreq_json = None\nconsensus_result = None\n\nif strategy == 'voting':\n    if os.path.exists(method_results_path):\n        with open(method_results_path, 'r') as f:\n            method_results = json.load(f)\n        print(f\"[Voting] Loaded canonical method results: {len(method_results)} methods\")\n        freq_data = {method_name: {feature: 1 for feature in features} for method_name, features in method_results.items()}\n        freq_json = json.dumps(freq_data)\n    else:\n        print('[Voting] Canonical method_results.json not found, checking legacy temp selector files...')\n        legacy_candidates = {\n            'random_forest': os.path.join(phase1_intermediate_latest, 'feature_selection', 'temp_rf_features.json'),\n            'lasso': os.path.join(phase1_intermediate_latest, 'feature_selection', 'temp_lasso_features.json'),\n            'mrmr': os.path.join(phase1_intermediate_latest, 'feature_selection', 'temp_mrmr_features.json')\n        }\n        legacy_results = {}\n        for method_name, file_path in legacy_candidates.items():\n            if os.path.exists(file_path):\n                with open(file_path, 'r') as f:\n                    legacy_results[method_name] = json.load(f)\n        if len(legacy_results) < 1:\n            raise FileNotFoundError('No canonical method_results.json and no usable legacy temp selector files found')\n        freq_data = {method_name: {feature: 1 for feature in features} for method_name, features in legacy_results.items()}\n        freq_json = json.dumps(freq_data)\n\n    consensus_result = json.loads(get_adaptive_consensus_features(freq_json, min_features=10))\n\nelif strategy == 'stability':\n    if os.path.exists(stability_freq_path):\n        with open(stability_freq_path, 'r') as f:\n            freq_payload = json.load(f)\n        print('[Stability] Loaded cached temp_stability_frequencies.json')\n        freq_json = json.dumps(freq_payload)\n    else:\n        temp_dir = context_variables.get('stability_temp_dir', os.path.join(phase1_intermediate_latest, 'stability_logs'))\n        print(f\"[Stability] Calculating frequencies from logs: {temp_dir}\")\n        freq_json = calculate_frequencies_from_logs(temp_dir)\n\n    consensus_result = json.loads(get_adaptive_consensus_features(freq_json, min_features=10))\n\nelse:\n    raise ValueError(f'Unknown selection strategy: {strategy}')\n\nif not consensus_result.get('success'):\n    raise ValueError(f\"Consensus extraction failed: {consensus_result.get('error')}\")\n\nfinal_features = consensus_result['consensus_features']\nstrategy_used = consensus_result.get('strategy_used', strategy_data.get('details', strategy))\n\nwith open(consensus_path, 'w') as f:\n    json.dump(final_features, f)\nwith open(strategy_path, 'w') as f:\n    json.dump({\n        'strategy': strategy,\n        'details': strategy_used,\n        'freq_threshold': consensus_result.get('freq_threshold'),\n        'vote_threshold': consensus_result.get('vote_threshold')\n    }, f)\n\nprint(f\"[Consensus] Final features: {len(final_features)}\")\nprint(json.dumps({'__METABO_UPDATE__': {\n    'consensus_features': final_features,\n    'n_features_selected': len(final_features),\n    'selection_strategy': strategy,\n    'consensus_strategy': strategy_used\n}}))\n```\n\n**CRITICAL RULES**:\n1. ✅ ALWAYS load `temp_selection_strategy.json` and read the `strategy` key\n2. ✅ ALWAYS reuse `temp_consensus_features.json` if it already exists and is non-empty\n3. ✅ For voting, prefer `method_results.json` over any legacy temp selector files\n4. ✅ For stability, prefer cached frequency JSON or `calculate_frequencies_from_logs(stability_temp_dir)`\n5. ❌ DO NOT fail just because `temp_rf_features.json` / `temp_lasso_features.json` / `temp_mrmr_features.json` are missing\n6. ✅ ALWAYS update `consensus_features` in Magic Output Protocol\n\nCONFIG-FIRST TEMPLATE (for all paths in this step):\n```python\nimport os\nfrom src.utils.config_manager import get_config\ncfg = get_config()\nphase1_intermediate_latest = cfg.get_phase1_path('intermediate_latest_dir') or 'output/phase1/intermediate/latest'\nphase1_artifacts_dir = cfg.get_phase1_path('artifacts_dir') or 'output/phase1/artifacts'\nphase1_final_dir = cfg.get_phase1_path('final_dir') or 'output/phase1/final'\n```",
+          "implementation_contract": "Step 5.2.2 is now an audit/reporting checkpoint for the unified stability pipeline. It should verify that `stability_selection_summary.json`, `stable_core_features`, and the single final panel are internally consistent, while avoiding any legacy voting recomputation.",
+          "details_override": "TASK: Audit the outputs of the unified train-only stability pipeline.\n\nAUDIT SCOPE:\n- Read `stability_selection_summary.json`, `stable_core_features.json`, `final_panel_selection.json`, and `temp_consensus_features.json`.\n- Verify that the single final panel in `temp_consensus_features.json` matches the final panel artifact.\n- Verify that every protected prior in `mandatory_features` is still present in either the stable core or the final panel.\n- Verify that `stable_core_features` is a subset of the ranked stability universe plus protected priors.\n- Emit bookkeeping updates only; do not rerun legacy voting or threshold-schedule logic.\n",
+          "lib_hint": "src.tools.analysis.feature_selection_tools, json, os",
+          "context_files": [
+            "temp_selection_strategy",
+            "method_results_json",
+            "temp_consensus_features",
+            "temp_stability_frequencies",
+            "stability_temp_dir"
+          ],
+          "outputs": [
+            "stable_core_features",
+            "consensus_features",
+            "n_features_selected"
+          ],
+          "reasoning": "从旧的投票共识说明切换为稳定性分数与 stable core 审计。"
+        },
+        {
+          "step_id": "5.2.3",
+          "action": "coding_task",
+          "instruction": "Validate Stable Panel Handoff",
+          "details": "TASK: Validate the canonical consensus feature handoff only.\n\nPURPOSE:\n- Step 5.2.2 already produces the canonical consensus list.\n- Step 5.3 is the ONLY step allowed to create the final TRAIN/HOLDOUT datasets.\n- Therefore Step 5.2.3 MUST NOT write selected_features_final.csv, MUST NOT change current_data_path, and MUST NOT create any holdout file.\n\nWORKFLOW:\n1. Load consensus features from context_variables['consensus_features'] or output/phase1/intermediate/latest/feature_selection/temp_consensus_features.json.\n2. Validate that the list exists and is non-empty.\n3. Save a small validation report under output/phase1/intermediate/latest/feature_selection/consensus_validation.json.\n4. Emit only bookkeeping state updates such as step_5_2_3_completed / consensus_validated.\n\nCRITICAL RULES:\n1. Do NOT modify current_data_path\n2. Do NOT create selected_features_final.csv\n3. Do NOT create selected_features_holdout.csv\n4. Do NOT remove mandatory features here\n5. Leave final dataset creation exclusively to Step 5.3\n",
+          "implementation_contract": "Validate that `temp_consensus_features.json` now stores the single final Phase 1 panel produced by the unified stability pipeline, that protected priors remain present, and that this step still does not create the final train/holdout datasets.",
+          "lib_hint": "pandas, json, os",
+          "context_files": [
+            "temp_consensus_features",
+            "consensus_features",
+            "current_data_path"
+          ],
+          "outputs": [
+            "consensus_validated",
+            "consensus_validation_path"
+          ],
+          "reasoning": "保持 handoff 验证职责，但校验对象改为统一稳定性 panel。"
+        },
+        {
+          "step_id": "5.3",
+          "action": "coding_task",
+          "instruction": "Create Final Train/Holdout Feature Datasets",
+          "details": "TASK: Merge mandatory features with consensus features and create final TRAIN dataset plus aligned HOLDOUT dataset.\n\n**LEAKAGE-GUARD RULE**:\n- Stage 5 must operate on the training pool only (`current_data_path`).\n- `holdout_data_path` is reserved for final evaluation and MUST NOT be used for feature ranking, voting, validation, or fallback decisions.\n- Final feature list is learned from the training pool, then projected onto the holdout pool with the exact same columns and the exact same order.\n- `ROW_ID` / `__row_id__` are internal technical keys, not biological features; they MUST be excluded from final feature lists.\n\nWORKFLOW:\n1. Load `consensus_features` from context / temp file.\n2. Load `mandatory_features` from context.\n3. Build `final_features = union(consensus_features, mandatory_features)`.\n4. Standardize feature names for matching, but preserve the canonical standardized names in the final outputs.\n5. Load the TRAIN pool from `current_data_path` and create `selected_features_final.csv`.\n6. If `holdout_data_path` exists, load it and create a matching `selected_features_holdout.csv` using the SAME `final_features`.\n7. If a final feature is missing in holdout after standardized matching, create that column with `0.0` and emit a warning instead of dropping it.\n8. Update state with both training and holdout selected dataset paths.\n\n```python\nimport json\nimport os\nimport pandas as pd\nfrom src.utils.feature_name_standardizer import standardize_feature_name\n\nconsensus_features = context_variables.get('consensus_features', [])\nmandatory_features = context_variables.get('mandatory_features', [])\nfinal_features = list(dict.fromkeys(consensus_features + mandatory_features))\nfinal_features = [standardize_feature_name(f) for f in final_features if str(f).strip()]\nfinal_features = [f for f in final_features if f not in {'ROW_ID', '__ROW_ID__', 'ROW_ID_'}]\nfinal_features = list(dict.fromkeys(final_features))\n\ntrain_pool_path = current_data_path\nholdout_data_path = context_variables.get('holdout_data_path')\ntarget_column = context_variables.get('target_column', 'target')\n\ntrain_df = pd.read_csv(train_pool_path)\nprotected_cols = [c for c in ['Sample_ID', 'sample_id', 'SampleID', 'sampleid', '__row_id__', 'ROW_ID', 'row_id', target_column] if c in train_df.columns]\ntrain_feature_map = {standardize_feature_name(col): col for col in train_df.columns if col not in protected_cols}\navailable_train_features = [f for f in final_features if f in train_feature_map]\ntrain_selected_df = pd.DataFrame()\nfor col in protected_cols:\n    train_selected_df[col] = train_df[col]\nfor feature in available_train_features:\n    train_selected_df[feature] = train_df[train_feature_map[feature]]\n\ntrain_output_path = os.path.join(phase1_final_dir, 'selected_features_final.csv')\ntrain_selected_df.to_csv(train_output_path, index=False)\n\nholdout_output_path = ''\nif holdout_data_path and os.path.exists(holdout_data_path):\n    holdout_df = pd.read_csv(holdout_data_path)\n    holdout_protected_cols = [c for c in ['Sample_ID', 'sample_id', 'SampleID', 'sampleid', '__row_id__', 'ROW_ID', 'row_id', target_column] if c in holdout_df.columns]\n    holdout_feature_map = {standardize_feature_name(col): col for col in holdout_df.columns if col not in holdout_protected_cols}\n\n    holdout_selected_df = pd.DataFrame()\n    for col in holdout_protected_cols:\n        holdout_selected_df[col] = holdout_df[col]\n    for feature in available_train_features:\n        if feature in holdout_feature_map:\n            holdout_selected_df[feature] = holdout_df[holdout_feature_map[feature]]\n        else:\n            holdout_selected_df[feature] = 0.0\n            print(f'[Warning] Holdout missing feature {feature}; filled with 0.0')\n\n    holdout_output_path = os.path.join(phase1_final_dir, 'selected_features_holdout.csv')\n    holdout_selected_df.to_csv(holdout_output_path, index=False)\n\nstate_updates = {\n    'selected_data_path': train_output_path,\n    'selected_dataset_path': train_output_path,\n    'current_data_path': train_output_path,\n    'selected_holdout_data_path': holdout_output_path,\n    'n_final_selected_features': len(available_train_features),\n    'final_selected_features': available_train_features,\n    'feature_selection_finalized': True,\n    'step_5_3_completed': True,\n    'ready_for_ml_pipeline': True\n}\nprint(json.dumps({'__METABO_UPDATE__': state_updates}))\n```\n\n**CRITICAL RULES**:\n1. ✅ Only the training pool may drive feature selection decisions\n2. ✅ Holdout must use the exact same selected feature list and column order\n3. ✅ Match holdout columns by standardized feature names\n4. ✅ Fill any residual missing holdout features with `0.0` instead of silently dropping them\n5. ❌ Do not validate mandatory features against holdout data\n6. ✅ Save both training and holdout selected datasets when holdout is available\n",
+          "implementation_contract": "Step 5.3 must only project the finalized single Phase 1 panel onto the train pool and holdout datasets. It must preserve protected priors, avoid generating any secondary panel, and export `final_selection_summary.json` with stable-core / final-panel metadata for downstream Phase 2 and reporting consumers.",
+          "lib_hint": "src.tools.analysis.feature_selection_tools, pandas",
+          "context_files": [
+            "consensus_features",
+            "mandatory_features",
+            "holdout_data_path"
+          ],
+          "outputs": [
+            "selected_dataset_path",
+            "selected_holdout_data_path",
+            "final_selection_summary_path",
+            "final_selected_features",
+            "feature_selection_finalized"
+          ],
+          "reasoning": "Step 5.3 只负责把统一稳定性 panel 投影成最终 Phase 2 handoff 数据集。"
+        }
+      ],
+      "id": 5
+    },
+    {
+      "stage_id": 6,
+      "name": "Model Building (模型构建)",
+      "description": "AutoGluon 建模，防泄露设计，特征冻结。",
+      "condition": "run_ml_pipeline == true",
+      "steps": [
+        {
+          "step_id": "6.1",
+          "action": "coding_task",
+          "instruction": "Analyze Data for Modeling",
+          "details": "Import `analyze_data_for_modeling` from `src.tools.analysis.model_building_tools`.\n\n**LEAKAGE-GUARD RULE**:\n- Analyze the selected TRAIN dataset only.\n- Do not use `selected_holdout_data_path` for feature decisions.\n\n```python\nimport json\nfrom src.tools.analysis.model_building_tools import analyze_data_for_modeling\n\ntrain_data_path = context_variables.get('selected_dataset_path', current_data_path)\ntarget_column = context_variables.get('target_column', 'target')\nresult_json = analyze_data_for_modeling(train_data_path, target_column)\nresult = json.loads(result_json)\n```\n\nSave the modeling analysis to `output/phase1/intermediate/latest/model_analysis/modeling_analysis.json` and update state.\n",
+          "lib_hint": "src.tools.analysis.model_building_tools, json",
+          "context_files": [
+            "selected_dataset_path",
+            "selected_holdout_data_path",
+            "target_column"
+          ],
+          "outputs": [
+            "modeling_analysis",
+            "modeling_analysis_complete"
+          ],
+          "reasoning": "确认建模数据状态。"
+        },
+        {
+          "step_id": "6.2",
+          "action": "coding_task",
+          "instruction": "Train Models with AutoGluon (Leakage-Free)",
+          "details": "TASK: Train models using `train_with_autogluon` with a leakage-safe external holdout.\n\n**LEAKAGE-GUARD RULE**:\n- `selected_dataset_path` is the training dataset produced in Step 5.3.\n- `selected_holdout_data_path` is the holdout dataset produced from the same final feature list.\n- When `selected_holdout_data_path` exists, ALWAYS pass it to `train_with_autogluon(..., test_data_path=selected_holdout_data_path)`.\n- Do NOT let Stage 6 create a new split from a dataset that has already undergone supervised feature selection.\n- Do NOT implement a custom training fallback in the step code; call `train_with_autogluon(...)` and let the tool handle backend fallback if AutoGluon is unavailable.\n\n```python\nimport json\nfrom src.tools.analysis.model_building_tools import train_with_autogluon\n\ntrain_data_path = context_variables.get('selected_dataset_path', current_data_path)\nholdout_data_path = context_variables.get('selected_holdout_data_path')\ntarget_column = context_variables.get('target_column', 'target')\n\nwith open(os.path.join(phase1_intermediate_latest, 'model_analysis', 'modeling_analysis.json'), 'r') as f:\n    analysis = json.load(f)\nimbalance_ratio = analysis.get('imbalance_ratio', 1.0)\nbalancing_method = 'smote_nearmiss' if imbalance_ratio > 2.0 else 'none'\n\nresult_json = train_with_autogluon(\n    data_path=train_data_path,\n    target_column=target_column,\n    balancing_method=balancing_method,\n    time_limit=180,\n    eval_metric='roc_auc',\n    presets='best_quality',\n    test_data_path=holdout_data_path if holdout_data_path else None\n)\nresult = json.loads(result_json)\nif not result.get('success'):\n    raise ValueError(result.get('error', 'AutoGluon training failed'))\n\nprint(json.dumps({'__METABO_UPDATE__': {\n    'training_results_json': result,\n    'model_training_complete': True,\n    'best_model_name': result.get('best_model'),\n    'split_strategy': result.get('split_strategy')\n}}))\n```\n\n**CRITICAL RULES**:\n1. ✅ Prefer external holdout evaluation over internal splitting\n2. ✅ Train only on `selected_dataset_path`\n3. ✅ Evaluate only on `selected_holdout_data_path` when available\n4. ❌ Do not recompute feature selection after the split\n",
+          "lib_hint": "src.tools.analysis.model_building_tools, json",
+          "context_files": [
+            "selected_dataset_path",
+            "selected_holdout_data_path",
+            "target_column",
+            "modeling_analysis"
+          ],
+          "outputs": [
+            "training_results_json",
+            "model_training_complete",
+            "best_model_name"
+          ],
+          "reasoning": "在训练集上训练，并使用外部分层 holdout 做最终评估，避免在已筛选数据上再次内部切分。"
+        },
+        {
+          "step_id": "6.3",
+          "action": "coding_task",
+          "instruction": "Save Model Artifacts",
+          "details": "Import `save_model_results` from `src.tools.analysis.model_building_tools`.\n\n**CRITICAL: Function Signature**\n```python\ndef save_model_results(\n    train_result_json: str,  # JSON string from Step 6.2\n    output_dir: Optional[str] = None  # Optional, will use configured canonical path by default\n) -> str:\n```\n\n**WORKFLOW**:\n1. Read the training results JSON file saved in Step 6.2:\n   ```python\n   import json\n   from src.tools.analysis.model_building_tools import save_model_results\n   \n   # Read training results from file\n   with open(os.path.join(phase1_artifacts_dir, 'autogluon_training_results.json'), 'r') as f:\n       training_results = json.load(f)\n   \n   # Convert back to JSON string for the tool\n   train_result_json = json.dumps(training_results)\n   ```\n\n2. Call save_model_results with the JSON string:\n   ```python\n   result_json = save_model_results(\n       train_result_json=train_result_json,\n       output_dir=\"output/phase1/artifacts/model_results\"\n   )\n   result = json.loads(result_json)\n   ```\n\n3. Check for success and extract paths:\n   ```python\n   if result.get('success'):\n       report_path = result.get('report_path')\n       leaderboard_path = result.get('leaderboard_path')\n       print(f\"Model artifacts saved successfully\")\n       print(f\"  - Report: {report_path}\")\n       print(f\"  - Leaderboard: {leaderboard_path}\")\n   else:\n       print(f\"Error: {result.get('error')}\")\n   ```\n\n4. Update state using Magic Output Protocol:\n   ```python\n   print(json.dumps({\n       \"__METABO_UPDATE__\": {\n           \"model_artifacts_saved\": True,\n           \"report_path\": report_path,\n           \"leaderboard_path\": leaderboard_path\n       }\n   }))\n   ```\n\n**IMPORTANT**: \n- The function expects a JSON STRING, not a file path\n- Do NOT pass parameters like `model_path` or `predictor_path` - they don't exist\n- The function saves the training report and leaderboard to disk automatically\n\nCONFIG-FIRST TEMPLATE (for all paths in this step):\n```python\nimport os\nfrom src.utils.config_manager import get_config\ncfg = get_config()\nphase1_intermediate_latest = cfg.get_phase1_path('intermediate_latest_dir') or 'output/phase1/intermediate/latest'\nphase1_artifacts_dir = cfg.get_phase1_path('artifacts_dir') or 'output/phase1/artifacts'\nphase1_final_dir = cfg.get_phase1_path('final_dir') or 'output/phase1/final'\n```\n",
+          "lib_hint": "src.tools.analysis.model_building_tools, json",
+          "context_files": [
+            "training_results_json"
+          ],
+          "outputs": [
+            "model_artifacts_path",
+            "report_path",
+            "leaderboard_path"
+          ],
+          "reasoning": "结果固化。保存训练报告和排行榜到磁盘。"
+        }
+      ],
+      "id": 6
+    }
+  ]
+}

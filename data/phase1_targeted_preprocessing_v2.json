@@ -1,0 +1,345 @@
+{
+  "sop_id": "targeted_preprocessing_v2",
+  "title": "靶向代谢组学预处理 SOP v2",
+  "version": "2.0.0-draft",
+  "execution_mode": "code_interpreter_agent",
+  "design_principles": [
+    "LLM cannot inspect raw data directly.",
+    "All preprocessing decisions must be evidence-backed by structured reports.",
+    "Public processed matrices and QC-aware datasets must follow different branches.",
+    "All key decisions must be exported as machine-readable artifacts.",
+    "Phase 4 must only report preprocessing facts present in exported artifacts."
+  ],
+  "scope": {
+    "omics_type": "targeted_metabolomics",
+    "supported_sources": [
+      "Metabolomics Workbench",
+      "MetaboLights",
+      "UK Biobank",
+      "user_uploaded_matrix"
+    ],
+    "supported_data_levels": [
+      "processed_matrix",
+      "raw_like_matrix_with_qc_metadata"
+    ]
+  },
+  "global_constraints": {
+    "llm_can_access": [
+      "metadata",
+      "schema summaries",
+      "structured quality reports",
+      "decision packs",
+      "tool documentation"
+    ],
+    "llm_cannot_access": [
+      "raw sample-by-feature matrix values",
+      "full table dumps"
+    ],
+    "must_export_artifacts": true,
+    "must_record_thresholds": true,
+    "must_record_fallbacks": true
+  },
+  "artifacts": {
+    "required_inputs": [
+      "input_dataset",
+      "study_metadata",
+      "column_roles"
+    ],
+    "required_outputs": [
+      "preprocessing_context.json",
+      "schema_audit_report.json",
+      "eligibility_filter_report.json",
+      "zero_pattern_report.json",
+      "missingness_report.json",
+      "imputation_report.json",
+      "normalization_decision_report.json",
+      "transformation_report.json",
+      "outlier_audit_report.json",
+      "batch_drift_audit.json",
+      "feature_engineering_report.json",
+      "scaling_report.json",
+      "preprocessing_report.json",
+      "preprocessing_summary.md",
+      "preprocessing_decision_pack.json",
+      "processed_matrix.csv"
+    ]
+  },
+  "stages": [
+    {
+      "stage_id": "stage0_context_resolution",
+      "goal": "Resolve dataset type and preprocessing branch before any transformation.",
+      "input_artifacts": [
+        "input_dataset",
+        "study_metadata",
+        "column_roles"
+      ],
+      "tools": [
+        "data_context_resolver_tool",
+        "metadata_schema_audit_tool"
+      ],
+      "llm_role": "Read context reports and confirm branch eligibility.",
+      "outputs": [
+        "preprocessing_context.json"
+      ],
+      "decision_points": [
+        "processed_matrix_vs_raw_like_matrix_with_qc_metadata",
+        "has_pooled_qc",
+        "has_blank_samples",
+        "has_run_order",
+        "has_batch_metadata",
+        "platform_source",
+        "zero_semantics_status"
+      ]
+    },
+    {
+      "stage_id": "stage1_schema_metadata_audit",
+      "goal": "Audit schema integrity and identify protected columns.",
+      "input_artifacts": [
+        "preprocessing_context.json"
+      ],
+      "tools": [
+        "metadata_schema_audit_tool"
+      ],
+      "llm_role": "Confirm protected columns and task definition without inspecting raw values.",
+      "outputs": [
+        "schema_audit_report.json"
+      ]
+    },
+    {
+      "stage_id": "stage2_eligibility_filtering",
+      "goal": "Filter invalid samples and analytes using branch-aware rules.",
+      "branches": {
+        "qc_aware_branch": {
+          "rules": {
+            "sample_missing_rate_threshold": 0.3,
+            "feature_missing_rate_threshold": 0.2,
+            "qc_cv_threshold_default": 0.3,
+            "blank_ratio_threshold": 5.0,
+            "group_detection_threshold": 0.8
+          }
+        },
+        "public_matrix_branch": {
+          "rules": {
+            "sample_missing_rate_threshold": 0.35,
+            "feature_missing_rate_threshold": 0.3,
+            "zero_rate_filter_threshold": 0.5,
+            "near_constant_variance_threshold": 1e-08
+          }
+        }
+      },
+      "tools": [
+        "sample_feature_filter_tool",
+        "qc_filter_audit_tool"
+      ],
+      "llm_role": "Choose the branch-specific rule set based on context report.",
+      "outputs": [
+        "eligibility_filter_report.json"
+      ]
+    },
+    {
+      "stage_id": "stage3_zero_semantics_resolution",
+      "goal": "Determine whether zeros represent true zeros, non-detects, or unknown values.",
+      "input_artifacts": [
+        "eligibility_filter_report.json",
+        "preprocessing_context.json",
+        "study_metadata"
+      ],
+      "tools": [
+        "zero_semantics_analyzer_tool"
+      ],
+      "llm_role": "Review zero summary and metadata, then decide zero handling strategy without inspecting raw matrix.",
+      "outputs": [
+        "zero_pattern_report.json"
+      ],
+      "decision_points": [
+        "zero_as_missing",
+        "zero_as_true_zero",
+        "zero_status_unknown_require_sensitivity_flag"
+      ]
+    },
+    {
+      "stage_id": "stage4_missingness_assessment",
+      "goal": "Assess missingness mechanism after optional zero-to-NaN conversion.",
+      "tools": [
+        "missingness_assessment_tool"
+      ],
+      "llm_role": "Select imputation family based on structured missingness evidence.",
+      "outputs": [
+        "missingness_report.json"
+      ],
+      "decision_points": [
+        "suspected_MNAR",
+        "suspected_MAR_or_MCAR",
+        "low_missing_no_imputation_needed"
+      ]
+    },
+    {
+      "stage_id": "stage5_imputation",
+      "goal": "Apply branch-consistent imputation with explicit fallback tracking.",
+      "default_policy": {
+        "MNAR": "QRILC",
+        "MAR_or_MCAR": "KNN",
+        "fallback": "median"
+      },
+      "tools": [
+        "impute_missing_tool"
+      ],
+      "llm_role": "Generate code that calls the approved imputation method selected in stage4.",
+      "outputs": [
+        "imputation_report.json",
+        "matrix_after_imputation.csv"
+      ]
+    },
+    {
+      "stage_id": "stage6_normalization_decision",
+      "goal": "Decide whether normalization is needed and which method is appropriate.",
+      "branches": {
+        "qc_aware_branch": {
+          "preferred_order": [
+            "drift_correction",
+            "sample_normalization"
+          ]
+        },
+        "public_matrix_branch": {
+          "preferred_order": [
+            "check_platform_normalized_values_first",
+            "apply_PQN_only_when_justified"
+          ]
+        }
+      },
+      "tools": [
+        "normalization_decision_tool",
+        "pqn_normalization_tool"
+      ],
+      "llm_role": "Decide whether PQN should be applied or skipped based on the normalization decision report.",
+      "outputs": [
+        "normalization_decision_report.json",
+        "matrix_after_normalization.csv"
+      ]
+    },
+    {
+      "stage_id": "stage7_transformation",
+      "goal": "Apply a monotonic variance-stabilizing transformation.",
+      "default_policy": {
+        "method": "log2",
+        "epsilon_strategy": "0.5_min_positive_or_reported_small_constant"
+      },
+      "tools": [
+        "log2_transformation_tool"
+      ],
+      "llm_role": "Use the approved epsilon strategy from prior reports.",
+      "outputs": [
+        "transformation_report.json",
+        "matrix_after_transformation.csv"
+      ]
+    },
+    {
+      "stage_id": "stage8_outlier_audit",
+      "goal": "Audit and optionally cap feature-level outliers while flagging sample-level anomalies.",
+      "tools": [
+        "feature_outlier_capping_tool",
+        "sample_outlier_audit_tool"
+      ],
+      "llm_role": "Decide whether to cap only or also flag samples based on audit reports.",
+      "outputs": [
+        "outlier_audit_report.json",
+        "matrix_after_outlier_handling.csv"
+      ]
+    },
+    {
+      "stage_id": "stage9_batch_drift_handling",
+      "goal": "Apply batch or drift handling only when metadata supports it.",
+      "branches": {
+        "qc_aware_branch": {
+          "allowed_methods": [
+            "qc_based_signal_drift_correction",
+            "qc_median_correction"
+          ]
+        },
+        "public_matrix_branch": {
+          "allowed_methods": [
+            "ComBat_if_batch_available",
+            "residualization_if_batch_available",
+            "skip_if_metadata_insufficient"
+          ]
+        }
+      },
+      "tools": [
+        "batch_drift_audit_tool",
+        "batch_correction_tool"
+      ],
+      "llm_role": "Select only supported correction paths justified by audit evidence.",
+      "outputs": [
+        "batch_drift_audit.json",
+        "matrix_after_batch_drift_handling.csv"
+      ]
+    },
+    {
+      "stage_id": "stage10_engineered_feature_generation",
+      "goal": "Generate validated composite features after base preprocessing is complete.",
+      "tools": [
+        "feature_generator_tool"
+      ],
+      "llm_role": "Use configured feature families only and document rationale.",
+      "outputs": [
+        "feature_engineering_report.json",
+        "matrix_after_feature_engineering.csv"
+      ]
+    },
+    {
+      "stage_id": "stage11_scaling",
+      "goal": "Scale the final model-ready matrix after raw and engineered features are merged.",
+      "default_policy": {
+        "method": "standard_zscore"
+      },
+      "tools": [
+        "auto_scaling_tool"
+      ],
+      "llm_role": "No free selection unless robust scaling is justified in reports.",
+      "outputs": [
+        "scaling_report.json",
+        "processed_matrix.csv"
+      ]
+    },
+    {
+      "stage_id": "stage12_preprocessing_qa_export",
+      "goal": "Export a single source of truth for downstream reporting and audit.",
+      "tools": [
+        "preprocessing_qa_reporter_tool",
+        "preprocessing_decision_packager_tool"
+      ],
+      "llm_role": "Summarize rationale using only exported facts.",
+      "outputs": [
+        "preprocessing_report.json",
+        "preprocessing_summary.md",
+        "preprocessing_decision_pack.json"
+      ]
+    }
+  ],
+  "phase4_contract": {
+    "must_be_reportable": [
+      "data_level",
+      "platform_source",
+      "zero_handling_strategy",
+      "sample_missing_rate_threshold",
+      "feature_missing_rate_threshold",
+      "imputation_method",
+      "normalization_method",
+      "transformation_method",
+      "outlier_method",
+      "batch_correction_applied",
+      "qc_rsd_filter_applied",
+      "qc_rsd_threshold"
+    ],
+    "must_not_be_claimed_without_artifact": [
+      "QC-RSD filtering",
+      "pooled QC correction",
+      "batch drift correction",
+      "MNAR-driven QRILC"
+    ]
+  },
+  "file_name": "phase1_targeted_preprocessing_v2.json",
+  "implementation_companions": {
+    "p0_tool_schemas": "data/phase1_p0_tool_schemas_v2.json"
+  }
+}
