@@ -1,0 +1,26 @@
+{
+  "schema_version": "metaboagent.report_template.v1",
+  "template_id": "metaboagent_evidence_to_decision",
+  "template_version": "v1.0",
+  "audience": "journal_reviewers",
+  "language_policy": {"primary": "en", "supported": ["en", "zh"]},
+  "sections": [
+    {"section_id": "executive_summary", "order": 1, "title": "Executive evidence summary", "kind": "hybrid", "required": true, "visibility": "always", "llm_policy": "llm_allowed", "required_claim_ids": ["claim_primary_scope", "claim_final_panel"], "figure_slots": [], "render_mode": "main_text"},
+    {"section_id": "study_overview", "order": 2, "title": "Study design and Phase 0-4 evidence flow", "kind": "hybrid", "required": true, "visibility": "always", "llm_policy": "deterministic_only", "required_claim_ids": ["claim_phase_flow"], "figure_slots": [{"slot_id": "slot_phase_flow", "figure_id": "phase_flow_overview", "required": true, "display": "inline_main_text", "fallback": "show_boundary"}], "render_mode": "main_text"},
+    {"section_id": "cohort_and_qc", "order": 3, "title": "Cohort, data profile and QC", "kind": "hybrid", "required": true, "visibility": "always", "llm_policy": "llm_allowed", "required_claim_ids": ["claim_cohort_qc"], "figure_slots": [{"slot_id": "slot_cohort_qc", "figure_id": "cohort_qc", "required": true, "display": "inline_main_text", "fallback": "show_boundary"}], "render_mode": "main_text"},
+    {"section_id": "discovery_and_selection", "order": 4, "title": "Prior evidence and feature selection", "kind": "hybrid", "required": true, "visibility": "always", "llm_policy": "llm_allowed", "required_claim_ids": ["claim_selection_stability", "claim_final_panel"], "figure_slots": [{"slot_id": "slot_selection_stability", "figure_id": "selection_stability", "required": true, "display": "inline_main_text", "fallback": "show_boundary"}], "render_mode": "main_text"},
+    {"section_id": "model_and_validation", "order": 5, "title": "Model development and validation", "kind": "hybrid", "required": true, "visibility": "always", "llm_policy": "llm_allowed", "required_claim_ids": ["claim_auc_cv", "claim_auc_holdout"], "figure_slots": [{"slot_id": "slot_model_performance", "figure_id": "model_performance", "required": true, "display": "inline_main_text", "fallback": "show_boundary"}], "render_mode": "main_text"},
+    {"section_id": "clinical_utility", "order": 6, "title": "Exploratory clinical utility", "kind": "hybrid", "required": true, "visibility": "if_available", "llm_policy": "llm_allowed", "required_claim_ids": ["claim_threshold_utility"], "figure_slots": [{"slot_id": "slot_clinical_utility", "figure_id": "clinical_utility", "required": false, "display": "inline_main_text", "fallback": "move_to_appendix"}], "render_mode": "main_text"},
+    {"section_id": "biological_interpretation", "order": 7, "title": "Evidence-scoped biological interpretation", "kind": "hybrid", "required": true, "visibility": "if_available", "llm_policy": "llm_allowed", "required_claim_ids": ["claim_biological_context"], "figure_slots": [{"slot_id": "slot_biology", "figure_id": "biological_interpretation", "required": false, "display": "inline_main_text", "fallback": "show_boundary"}], "render_mode": "main_text"},
+    {"section_id": "limitations", "order": 8, "title": "Limitations and next validation study", "kind": "narrative", "required": true, "visibility": "always", "llm_policy": "deterministic_only", "required_claim_ids": [], "figure_slots": [], "render_mode": "main_text"},
+    {"section_id": "technical_appendix", "order": 9, "title": "Claim graph, audit and artifact appendix", "kind": "appendix", "required": true, "visibility": "always", "llm_policy": "deterministic_only", "required_claim_ids": [], "figure_slots": [], "render_mode": "collapsible_appendix"}
+  ],
+  "release_gates": [
+    {"gate_id": "single_source_metrics", "description": "All reader-facing numeric claims resolve to one metric registry.", "severity": "blocker", "rule": "No conflicting values for the same metric and scope across summary, table, figure caption and appendix."},
+    {"gate_id": "phase_flow_complete", "description": "Phase 0-4 flow is present and all referenced artifacts resolve.", "severity": "blocker", "rule": "All five phases must have nodes; every node input/output must reference an artifact."},
+    {"gate_id": "figure_claim_binding", "description": "Every main-text figure is linked to a claim and section.", "severity": "blocker", "rule": "publication_role=main_figure requires a valid claim_id, section_id and anchor_after_claim."},
+    {"gate_id": "no_unresolved_placeholders", "description": "Reader-facing output contains no programmer placeholders.", "severity": "blocker", "rule": "Reject not_archived-as-model-name, semicolon-only fields, empty figure citations and malformed fold counts."},
+    {"gate_id": "external_scope_guard", "description": "External validation labels require explicit external provenance.", "severity": "blocker", "rule": "No external scope without an explicitly declared external cohort artifact."},
+    {"gate_id": "caption_completeness", "description": "Main figures have complete publication captions.", "severity": "warning", "rule": "All caption_contract.required_fields must be populated before main-text publication."}
+  ]
+}

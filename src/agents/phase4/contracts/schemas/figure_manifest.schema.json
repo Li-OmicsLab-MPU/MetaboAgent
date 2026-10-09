@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://metaboagent.local/schemas/figure_manifest.schema.json",
+  "title": "MetaboAgent Figure Manifest",
+  "description": "Figure provenance, publication role, caption contract and inline placement rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "figures", "policy"],
+  "properties": {
+    "schema_version": {"const": "metaboagent.figure_manifest.v1"},
+    "run_id": {"$ref": "#/$defs/nonEmptyString"},
+    "figures": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/figure"},
+      "minItems": 1
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["external_label_rule", "main_text_rule", "caption_rule"],
+      "properties": {
+        "external_label_rule": {
+          "const": "A figure may use external scope only when its source artifact is explicitly external."
+        },
+        "main_text_rule": {
+          "const": "Every main-text figure must be anchored to a claim and a report section."
+        },
+        "caption_rule": {
+          "const": "A publication figure cannot be ready without all required caption fields."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "scope": {"enum": ["raw", "train_only", "development_cv", "internal_holdout", "external", "mixed"]},
+    "fitScope": {"enum": ["none", "train_only", "within_training_fold", "full_development", "external_only", "mixed"]},
+    "status": {"enum": ["ready", "partial", "planned", "not_archived", "failed"]},
+    "figure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["figure_id", "title", "analysis_type", "source_artifacts", "claim_ids", "cohort_scope", "fit_scope", "placement", "caption_contract", "outputs", "publication_role", "status"],
+      "properties": {
+        "figure_id": {"$ref": "#/$defs/nonEmptyString", "pattern": "^[a-z][a-z0-9_]*$"},
+        "legacy_figure_id": {"type": ["string", "null"]},
+        "title": {"$ref": "#/$defs/nonEmptyString"},
+        "analysis_type": {"enum": ["workflow", "qc", "feature_selection", "association", "model_performance", "calibration", "clinical_utility", "interpretability", "biology", "other"]},
+        "source_artifacts": {"type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}, "minItems": 1},
+        "claim_ids": {"type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}, "minItems": 1},
+        "cohort_scope": {"$ref": "#/$defs/scope"},
+        "prediction_source": {"type": ["string", "null"]},
+        "fit_scope": {"$ref": "#/$defs/fitScope"},
+        "placement": {"$ref": "#/$defs/placement"},
+        "caption_contract": {"$ref": "#/$defs/caption"},
+        "outputs": {"type": "array", "items": {"$ref": "#/$defs/output"}, "minItems": 1},
+        "publication_role": {"enum": ["main_figure", "supplementary_figure", "appendix", "audit_only"]},
+        "status": {"$ref": "#/$defs/status"},
+        "interpretation_boundary": {"type": ["string", "null"]}
+      }
+    },
+    "placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section_id", "display", "anchor_after_claim"],
+      "properties": {
+        "section_id": {"$ref": "#/$defs/nonEmptyString"},
+        "display": {"enum": ["inline_main_text", "main_text_block", "supplementary", "appendix", "gallery_only"]},
+        "anchor_after_claim": {"type": ["string", "null"]}
+      }
+    },
+    "caption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_fields"],
+      "properties": {
+        "required_fields": {
+          "type": "array",
+          "items": {"enum": ["n_samples", "outcome_definition", "cohort_scope", "fit_scope", "analysis_method", "uncertainty", "panel_or_feature_definition", "interpretation_boundary"]},
+          "minItems": 3
+        },
+        "text_template": {"type": ["string", "null"]}
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "format", "role", "status"],
+      "properties": {
+        "path": {"$ref": "#/$defs/nonEmptyString"},
+        "format": {"enum": ["png", "svg", "pdf", "csv", "json", "other"]},
+        "role": {"enum": ["primary", "preview", "source_data", "metadata"]},
+        "status": {"enum": ["available", "missing", "not_archived", "failed"]},
+        "sha256": {"type": ["string", "null"], "pattern": "^[a-fA-F0-9]{64}$"}
+      }
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://metaboagent.local/schemas/report_template.schema.json",
+  "title": "MetaboAgent Report Template Contract",
+  "description": "Cross-dataset section order, evidence requirements, figure slots and LLM permissions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "template_id", "template_version", "audience", "language_policy", "sections", "release_gates"],
+  "properties": {
+    "schema_version": {"const": "metaboagent.report_template.v1"},
+    "template_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "template_version": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+$"},
+    "audience": {"enum": ["research_readers", "journal_reviewers", "clinical_researchers"]},
+    "language_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "supported"],
+      "properties": {
+        "primary": {"enum": ["en", "zh"]},
+        "supported": {"type": "array", "items": {"enum": ["en", "zh"]}, "minItems": 1}
+      }
+    },
+    "sections": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/section"},
+      "minItems": 1
+    },
+    "release_gates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/gate"},
+      "minItems": 1
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section_id", "order", "title", "kind", "required", "visibility", "llm_policy", "figure_slots"],
+      "properties": {
+        "section_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "order": {"type": "integer", "minimum": 1},
+        "title": {"$ref": "#/$defs/nonEmptyString"},
+        "kind": {"enum": ["hybrid", "narrative", "table", "appendix"]},
+        "required": {"type": "boolean"},
+        "visibility": {"enum": ["always", "if_available", "conditional"]},
+        "llm_policy": {"enum": ["deterministic_only", "llm_allowed", "llm_required"]},
+        "required_claim_ids": {"type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}},
+        "figure_slots": {"type": "array", "items": {"$ref": "#/$defs/figureSlot"}},
+        "render_mode": {"enum": ["main_text", "collapsible_appendix", "supplementary"]}
+      }
+    },
+    "figureSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot_id", "figure_id", "required", "display"],
+      "properties": {
+        "slot_id": {"$ref": "#/$defs/nonEmptyString"},
+        "figure_id": {"$ref": "#/$defs/nonEmptyString"},
+        "required": {"type": "boolean"},
+        "display": {"enum": ["inline_main_text", "main_text_block", "supplementary", "appendix", "gallery_only"]},
+        "fallback": {"enum": ["show_boundary", "move_to_appendix", "omit"]}
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gate_id", "description", "severity", "rule"],
+      "properties": {
+        "gate_id": {"$ref": "#/$defs/nonEmptyString"},
+        "description": {"$ref": "#/$defs/nonEmptyString"},
+        "severity": {"enum": ["blocker", "warning", "information"]},
+        "rule": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    }
+  }
+}
