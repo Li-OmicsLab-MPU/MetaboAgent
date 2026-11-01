@@ -92,5 +92,6 @@ npm run build
 
 ## License
 
-No open-source license has been assigned yet. Add an appropriate `LICENSE` file
-before publishing if reuse or redistribution should be permitted.
+MetaboAgent is released under the MIT License. See the LICENSE file for details.
+
+Third-party datasets, knowledge bases, and other external resources are subject to their respective licenses and access restrictions.
