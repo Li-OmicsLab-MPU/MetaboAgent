@@ -1,0 +1,38 @@
+# Added by cleanup_project_structure.py
+temp_stab_*/
+temp_*/
+*_backup_*/
+archives/backups/
+*.log
+archives/logs/
+analysis_outputs/
+analysis_results/
+results/
+model_output/
+AutogluonModels/
+__pycache__/
+*.pyc
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.env
+
+# Local MetaboAgent knowledge and generated artifacts
+storage/
+output/
+
+# Local Python environments
+.venv/
+venv/
+
+# Frontend build and dependencies
+node_modules/
+dist/
+
+# Local configuration and secrets (keep safe templates)
+.env.*
+!.env.example
+
+# OS/editor files
+.DS_Store
